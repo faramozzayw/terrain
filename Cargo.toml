@@ -1,0 +1,13 @@
+[package]
+name = "bevy_terrain"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.14"
+gltf = "1.3"
+image = "0.25"
+bevy_flycam = "0.14"
+bevy-inspector-egui = "0.27"
+nalgebra = "0.33.2"
+rayon = "1.10"
