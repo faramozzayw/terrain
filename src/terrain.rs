@@ -1,7 +1,9 @@
-use crate::utils::{create_mesh, update_normals};
 use bevy::prelude::*;
 use nalgebra::Vector3;
 use rayon::prelude::*;
+use std::collections::HashMap;
+
+use crate::utils::{create_mesh, update_normals};
 
 pub struct Terrain {
     pub chunks: Vec<Chunk>,
@@ -31,7 +33,54 @@ impl Terrain {
             }
         }
 
-        Self { chunks }
+        let mut terrain = Self { chunks };
+        terrain.stitch_normals();
+        terrain
+    }
+
+    fn get_world_space_position(chunk: &Chunk, position: &Vector3<f32>) -> (usize, usize) {
+        let x = chunk.chunk_x * Chunk::CHUNK_SIZE + position.x as usize;
+        let y = chunk.chunk_y * Chunk::CHUNK_SIZE + position.z as usize;
+
+        (x, y)
+    }
+
+    pub fn stitch_normals(&mut self) {
+        type VertexKey = (usize, usize);
+        let mut normal_map: HashMap<VertexKey, Vec<Vector3<f32>>> = HashMap::new();
+        let mut averaged_normals: HashMap<VertexKey, Vector3<f32>> = HashMap::new();
+
+        // Collect normals from all chunks
+        // For each chunk, we calculate the world-space position of each vertex using its local chunk position
+        // and the chunk's global coordinates (chunk_x, chunk_y). This gives us a unique key for each vertex.
+        // If a vertex appears in multiple chunks (i.e., it's on the edge of a chunk), its world-space position
+        // will be the same, and the normals from all chunks sharing this vertex will be averaged.
+        for chunk in &self.chunks {
+            for (i, position) in chunk.positions.iter().enumerate() {
+                let (x, y) = Self::get_world_space_position(chunk, position);
+
+                // The key (x, y) represents the world-space position of the vertex.
+                // If multiple chunks share this vertex, the normals will be collected in normal_map under the same key.
+                normal_map.entry((x, y)).or_default().push(chunk.normals[i]);
+            }
+        }
+
+        // If the vertex is not shared (i.e., it only exists in one chunk), no averaging happens for it; the normal stays the same.
+        // If the vertex is shared (i.e., it exists in multiple chunks), the normals are averaged.
+        for (key, normals) in &normal_map {
+            let normal = normals.iter().cloned().sum::<Vector3<f32>>().normalize();
+            averaged_normals.insert(*key, normal);
+        }
+
+        for chunk in &mut self.chunks {
+            for (i, position) in chunk.positions.iter().enumerate() {
+                let (x, y) = Self::get_world_space_position(chunk, position);
+                let Some(averaged_normal) = averaged_normals.get(&(x, y)) else {
+                    continue;
+                };
+                chunk.normals[i] = *averaged_normal;
+            }
+        }
     }
 }
 
@@ -104,5 +153,76 @@ impl Chunk {
             chunk_x: original_chunk_x,
             chunk_y: original_chunk_y,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Vector3;
+
+    fn create_mock_chunk(
+        positions: Vec<Vector3<f32>>,
+        normals: Vec<Vector3<f32>>,
+        chunk_x: usize,
+        chunk_y: usize,
+    ) -> Chunk {
+        let uvs = vec![[0.0, 0.0]; positions.len()]; // Dummy UVs
+        let indices = vec![]; // Dummy indices, not needed for this test
+        Chunk {
+            positions,
+            normals,
+            uvs,
+            indices,
+            chunk_x,
+            chunk_y,
+        }
+    }
+
+    #[test]
+    fn test_stitch_normals() {
+        let positions_chunk1 = vec![
+            Vector3::new(0.0, 1.0, 0.0), // Vertex at (0, 0)
+            Vector3::new(1.0, 1.0, 0.0), // Vertex at (1, 0)
+            Vector3::new(0.0, 1.0, 1.0), // Vertex at (0, 1)
+        ];
+        let normals_chunk1 = vec![
+            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (0, 0)
+            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 0)
+            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (0, 1)
+        ];
+
+        let positions_chunk2 = vec![
+            Vector3::new(1.0, 2.0, 0.0), // Vertex at (1, 0)
+            Vector3::new(2.0, 2.0, 0.0), // Vertex at (2, 0)
+            Vector3::new(1.0, 2.0, 1.0), // Vertex at (1, 1)
+        ];
+        let normals_chunk2 = vec![
+            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 0)
+            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (2, 0)
+            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 1)
+        ];
+
+        let chunk1 = create_mock_chunk(positions_chunk1, normals_chunk1, 0, 0);
+        let chunk2 = create_mock_chunk(positions_chunk2, normals_chunk2, 1, 0);
+
+        let mut terrain = Terrain {
+            chunks: vec![chunk1, chunk2],
+        };
+
+        terrain.stitch_normals();
+
+        // Check the normals for shared vertices
+        let chunk1_normals = &terrain.chunks[0].normals;
+        let chunk2_normals = &terrain.chunks[1].normals;
+
+        assert_eq!(chunk1_normals[1], Vector3::new(0.0, 1.0, 0.0)); // Vertex (1, 0) in chunk1
+        assert_eq!(chunk2_normals[0], Vector3::new(0.0, 1.0, 0.0)); // Vertex (1, 0) in chunk2
+
+        // For vertex (0, 1) in chunk1, it should remain the same
+        assert_eq!(chunk1_normals[2], Vector3::new(0.0, 1.0, 0.0)); // Vertex (0, 1) in chunk1
+
+        // For vertex (2, 0) in chunk2, it should remain the same
+        assert_eq!(chunk2_normals[1], Vector3::new(0.0, 1.0, 0.0)); // Vertex (2, 0) in chunk2
     }
 }
