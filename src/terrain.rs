@@ -39,10 +39,9 @@ impl Terrain {
     }
 
     pub fn stitch_normals(&mut self) {
-        let capacity = self.chunks.len() * self.chunks[0].positions.len();
-        let start = std::time::Instant::now();
-
         type VertexKey = (usize, usize);
+
+        let capacity = self.chunks.len() * self.chunks[0].positions.len();
         let mut normal_map: HashMap<VertexKey, Vec<Vector3<f32>>> =
             HashMap::with_capacity(capacity);
 
@@ -84,9 +83,6 @@ impl Terrain {
                 })
                 .collect();
         });
-
-        let duration = start.elapsed();
-        println!("Execution time: {:?}", duration);
     }
 }
 
