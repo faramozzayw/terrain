@@ -38,17 +38,13 @@ impl Terrain {
         terrain
     }
 
-    fn get_world_space_position(chunk: &Chunk, position: &Vector3<f32>) -> (usize, usize) {
-        let x = chunk.chunk_x * Chunk::CHUNK_SIZE + position.x as usize;
-        let y = chunk.chunk_y * Chunk::CHUNK_SIZE + position.z as usize;
-
-        (x, y)
-    }
-
     pub fn stitch_normals(&mut self) {
+        let capacity = self.chunks.len() * self.chunks[0].positions.len();
+        let start = std::time::Instant::now();
+
         type VertexKey = (usize, usize);
-        let mut normal_map: HashMap<VertexKey, Vec<Vector3<f32>>> = HashMap::new();
-        let mut averaged_normals: HashMap<VertexKey, Vector3<f32>> = HashMap::new();
+        let mut normal_map: HashMap<VertexKey, Vec<Vector3<f32>>> =
+            HashMap::with_capacity(capacity);
 
         // Collect normals from all chunks
         // For each chunk, we calculate the world-space position of each vertex using its local chunk position
@@ -57,35 +53,53 @@ impl Terrain {
         // will be the same, and the normals from all chunks sharing this vertex will be averaged.
         for chunk in &self.chunks {
             for (i, position) in chunk.positions.iter().enumerate() {
-                let (x, y) = Self::get_world_space_position(chunk, position);
+                let pos = chunk.get_world_space_position(position);
 
                 // The key (x, y) represents the world-space position of the vertex.
                 // If multiple chunks share this vertex, the normals will be collected in normal_map under the same key.
-                normal_map.entry((x, y)).or_default().push(chunk.normals[i]);
+                normal_map.entry(pos).or_default().push(chunk.normals[i]);
             }
         }
 
         // If the vertex is not shared (i.e., it only exists in one chunk), no averaging happens for it; the normal stays the same.
         // If the vertex is shared (i.e., it exists in multiple chunks), the normals are averaged.
-        for (key, normals) in &normal_map {
-            let normal = normals.iter().cloned().sum::<Vector3<f32>>().normalize();
-            averaged_normals.insert(*key, normal);
-        }
+        let averaged_normals: HashMap<VertexKey, Vector3<f32>> = normal_map
+            .par_iter()
+            .map(|(key, normals)| {
+                let average = normals
+                    .iter()
+                    .fold(Vector3::zeros(), |acc, n| acc + *n)
+                    .normalize();
+                (*key, average)
+            })
+            .collect();
 
-        for chunk in &mut self.chunks {
-            for (i, position) in chunk.positions.iter().enumerate() {
-                let (x, y) = Self::get_world_space_position(chunk, position);
-                let Some(averaged_normal) = averaged_normals.get(&(x, y)) else {
-                    continue;
-                };
-                chunk.normals[i] = *averaged_normal;
-            }
-        }
+        self.chunks.par_iter_mut().for_each(|chunk| {
+            chunk.normals = chunk
+                .positions
+                .par_iter()
+                .map(|position| {
+                    let pos = chunk.get_world_space_position(position);
+                    averaged_normals[&pos]
+                })
+                .collect();
+        });
+
+        let duration = start.elapsed();
+        println!("Execution time: {:?}", duration);
     }
 }
 
 impl Chunk {
     pub const CHUNK_SIZE: usize = 128;
+
+    #[inline]
+    pub fn get_world_space_position(&self, position: &Vector3<f32>) -> (usize, usize) {
+        let x = self.chunk_x * Chunk::CHUNK_SIZE + position.x as usize;
+        let y = self.chunk_y * Chunk::CHUNK_SIZE + position.z as usize;
+
+        (x, y)
+    }
 
     pub fn into_mesh(mut self) -> Mesh {
         self.normals
