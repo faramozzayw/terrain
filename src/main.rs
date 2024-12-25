@@ -1,7 +1,12 @@
 mod terrain;
 mod utils;
 
-use bevy::{color::palettes::tailwind::YELLOW_400, prelude::*};
+use bevy::{
+    color::palettes::tailwind::YELLOW_400,
+    pbr::{ExtendedMaterial, MaterialExtension},
+    prelude::*,
+    render::render_resource::{self, AsBindGroup},
+};
 use bevy_flycam::{MovementSettings, PlayerPlugin};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use terrain::{Chunk, Terrain};
@@ -17,13 +22,30 @@ fn main() {
             sensitivity: 0.00015,
             speed: 60.0,
         })
+        .add_plugins(MaterialPlugin::<
+            ExtendedMaterial<StandardMaterial, TerrainExtension>,
+        >::default())
         .run();
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub struct TerrainExtension {}
+
+impl MaterialExtension for TerrainExtension {
+    fn fragment_shader() -> render_resource::ShaderRef {
+        "shaders/terrain_shader.wgsl".into()
+    }
+
+    fn deferred_fragment_shader() -> render_resource::ShaderRef {
+        "shaders/terrain_shader.wgsl".into()
+    }
 }
 
 fn setup(
     mut commands: Commands,
+    _asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainExtension>>>,
 ) {
     let heightmap = parse_heightmap("assets/heightmap2.png");
     let num_chunks = heightmap.len() / Chunk::CHUNK_SIZE;
@@ -36,9 +58,15 @@ fn setup(
 
         commands.spawn((
             Name::new(format!("Chunk [{x},{z}]")),
-            PbrBundle {
+            MaterialMeshBundle {
                 mesh: meshes.add(chunk.clone().into_mesh()),
-                material: materials.add(Color::srgb(0.2, 0.8, 0.2)),
+                material: materials.add(ExtendedMaterial {
+                    base: StandardMaterial {
+                        base_color: Color::NONE,
+                        ..Default::default()
+                    },
+                    extension: TerrainExtension {},
+                }),
                 transform: Transform::from_xyz(x, 0.0, z),
                 ..Default::default()
             },
