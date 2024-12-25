@@ -2,7 +2,7 @@ mod terrain;
 mod utils;
 
 use bevy::{
-    color::palettes::tailwind::YELLOW_400,
+    color::palettes::css::WHITE,
     pbr::{ExtendedMaterial, MaterialExtension},
     prelude::*,
     render::render_resource::{self, AsBindGroup},
@@ -29,7 +29,19 @@ fn main() {
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-pub struct TerrainExtension {}
+pub struct TerrainExtension {
+    #[texture(100)]
+    #[sampler(101)]
+    pub grass_texture: Handle<Image>,
+
+    #[texture(102)]
+    #[sampler(103)]
+    pub rock_texture: Handle<Image>,
+
+    #[texture(104)]
+    #[sampler(105)]
+    pub snow_texture: Handle<Image>,
+}
 
 impl MaterialExtension for TerrainExtension {
     fn fragment_shader() -> render_resource::ShaderRef {
@@ -43,9 +55,10 @@ impl MaterialExtension for TerrainExtension {
 
 fn setup(
     mut commands: Commands,
-    _asset_server: Res<AssetServer>,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainExtension>>>,
+    mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainExtension>>>,
+    mut standard_materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let heightmap = parse_heightmap("assets/heightmap2.png");
     let num_chunks = heightmap.len() / Chunk::CHUNK_SIZE;
@@ -60,12 +73,16 @@ fn setup(
             Name::new(format!("Chunk [{x},{z}]")),
             MaterialMeshBundle {
                 mesh: meshes.add(chunk.clone().into_mesh()),
-                material: materials.add(ExtendedMaterial {
+                material: terrain_materials.add(ExtendedMaterial {
                     base: StandardMaterial {
                         base_color: Color::NONE,
                         ..Default::default()
                     },
-                    extension: TerrainExtension {},
+                    extension: TerrainExtension {
+                        grass_texture: asset_server.load("textures/grass.jpg"),
+                        rock_texture: asset_server.load("textures/rock.jpg"),
+                        snow_texture: asset_server.load("textures/snow.jpg"),
+                    },
                 }),
                 transform: Transform::from_xyz(x, 0.0, z),
                 ..Default::default()
@@ -73,10 +90,17 @@ fn setup(
         ));
     }
 
+    commands.spawn(PbrBundle {
+        mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        material: standard_materials.add(Color::srgb_u8(124, 144, 255)),
+        transform: Transform::from_xyz(0.0, 0.5, 0.0),
+        ..default()
+    });
+
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
             illuminance: 10_000.0,
-            color: YELLOW_400.into(),
+            color: WHITE.into(),
             ..default()
         },
         transform: Transform::from_xyz(5.0, 5.0, 5.0).with_rotation(Quat::from_euler(
