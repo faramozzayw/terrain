@@ -15,10 +15,6 @@
 }
 #endif
 
-struct TerrainMaterial {
-  quantize_steps: u32,
-}
-
 @group(2) @binding(100)
 var grass_texture: texture_2d<f32>;
 @group(2) @binding(101)
