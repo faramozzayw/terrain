@@ -71,44 +71,38 @@ fn setup(
 
         commands.spawn((
             Name::new(format!("Chunk [{x},{z}]")),
-            MaterialMeshBundle {
-                mesh: meshes.add(chunk.clone().into_mesh()),
-                material: terrain_materials.add(ExtendedMaterial {
-                    base: StandardMaterial {
-                        base_color: Color::NONE,
-                        ..Default::default()
-                    },
-                    extension: TerrainExtension {
-                        grass_texture: asset_server.load("textures/grass.jpg"),
-                        rock_texture: asset_server.load("textures/rock.jpg"),
-                        snow_texture: asset_server.load("textures/snow.jpg"),
-                    },
-                }),
-                transform: Transform::from_xyz(x, 0.0, z),
-                ..Default::default()
-            },
+            Mesh3d(meshes.add(chunk.clone().into_mesh())),
+            MeshMaterial3d(terrain_materials.add(ExtendedMaterial {
+                base: StandardMaterial {
+                    base_color: Color::NONE,
+                    ..Default::default()
+                },
+                extension: TerrainExtension {
+                    grass_texture: asset_server.load("textures/grass.jpg"),
+                    rock_texture: asset_server.load("textures/rock.jpg"),
+                    snow_texture: asset_server.load("textures/snow.jpg"),
+                },
+            })),
+            Transform::from_xyz(x, 0.0, z),
         ));
     }
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+        MeshMaterial3d(standard_materials.add(Color::srgb_u8(124, 144, 255))),
+        Transform::from_xyz(0.0, 0.5, 0.0),
+    ));
 
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        material: standard_materials.add(Color::srgb_u8(124, 144, 255)),
-        transform: Transform::from_xyz(0.0, 0.5, 0.0),
-        ..default()
-    });
-
-    commands.spawn(DirectionalLightBundle {
-        directional_light: DirectionalLight {
+    commands.spawn((
+        DirectionalLight {
             illuminance: 10_000.0,
             color: WHITE.into(),
             ..default()
         },
-        transform: Transform::from_xyz(5.0, 5.0, 5.0).with_rotation(Quat::from_euler(
+        Transform::from_xyz(5.0, 5.0, 5.0).with_rotation(Quat::from_euler(
             EulerRot::XYZ,
             -0.1,
             0.0,
             0.0,
         )),
-        ..default()
-    });
+    ));
 }

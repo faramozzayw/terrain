@@ -40,7 +40,6 @@ fn fragment(
 
   let max_grass_level = 5.0;
   let max_rock_level = 10.0;
-  let transtion_width = 3.0;
 
   let grass = textureSample(grass_texture, grass_sampler, in.uv);
   let rock = textureSample(rock_texture, rock_sampler, in.uv);
