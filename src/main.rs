@@ -18,6 +18,7 @@ fn main() {
         .add_plugins(PlayerPlugin)
         .add_plugins(WorldInspectorPlugin::new())
         .add_systems(Startup, setup)
+        .add_systems(Update, create_array_texture)
         .insert_resource(MovementSettings {
             sensitivity: 0.00015,
             speed: 60.0,
@@ -30,17 +31,9 @@ fn main() {
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct TerrainExtension {
-    #[texture(100)]
+    #[texture(100, dimension = "2d_array")]
     #[sampler(101)]
-    pub grass_texture: Handle<Image>,
-
-    #[texture(102)]
-    #[sampler(103)]
-    pub rock_texture: Handle<Image>,
-
-    #[texture(104)]
-    #[sampler(105)]
-    pub snow_texture: Handle<Image>,
+    array_texture: Handle<Image>,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -53,13 +46,40 @@ impl MaterialExtension for TerrainExtension {
     }
 }
 
-fn setup(
+#[derive(Resource)]
+struct LoadingTexture {
+    is_loaded: bool,
+    handle: Handle<Image>,
+}
+
+fn create_array_texture(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut loading_texture: ResMut<LoadingTexture>,
+    mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainExtension>>>,
-    mut standard_materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    if loading_texture.is_loaded || !asset_server.load_state(&loading_texture.handle).is_loaded() {
+        return;
+    }
+    loading_texture.is_loaded = true;
+
+    if let Some(image) = images.get_mut(&loading_texture.handle) {
+        let array_layers = 3;
+        image.reinterpret_stacked_2d_as_array(array_layers);
+    }
+
+    let extension_handle = terrain_materials.add(ExtendedMaterial {
+        base: StandardMaterial {
+            base_color: Color::NONE,
+            ..Default::default()
+        },
+        extension: TerrainExtension {
+            array_texture: loading_texture.handle.clone(),
+        },
+    });
+
     let heightmap = parse_heightmap("assets/heightmap2.png");
     let num_chunks = heightmap.len() / Chunk::CHUNK_SIZE;
 
@@ -72,20 +92,23 @@ fn setup(
         commands.spawn((
             Name::new(format!("Chunk [{x},{z}]")),
             Mesh3d(meshes.add(chunk.clone().into_mesh())),
-            MeshMaterial3d(terrain_materials.add(ExtendedMaterial {
-                base: StandardMaterial {
-                    base_color: Color::NONE,
-                    ..Default::default()
-                },
-                extension: TerrainExtension {
-                    grass_texture: asset_server.load("textures/grass.jpg"),
-                    rock_texture: asset_server.load("textures/rock.jpg"),
-                    snow_texture: asset_server.load("textures/snow.jpg"),
-                },
-            })),
+            MeshMaterial3d(extension_handle.clone()),
             Transform::from_xyz(x, 0.0, z),
         ));
     }
+}
+
+fn setup(
+    asset_server: Res<AssetServer>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut standard_materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.insert_resource(LoadingTexture {
+        is_loaded: false,
+        handle: asset_server.load("textures/array_texture.png"),
+    });
+
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
         MeshMaterial3d(standard_materials.add(Color::srgb_u8(124, 144, 255))),

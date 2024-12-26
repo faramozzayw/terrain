@@ -15,20 +15,8 @@
 }
 #endif
 
-@group(2) @binding(100)
-var grass_texture: texture_2d<f32>;
-@group(2) @binding(101)
-var grass_sampler: sampler;
-
-@group(2) @binding(102)
-var rock_texture: texture_2d<f32>;
-@group(2) @binding(103)
-var rock_sampler: sampler;
-
-@group(2) @binding(104)
-var snow_texture: texture_2d<f32>;
-@group(2) @binding(105)
-var snow_sampler: sampler;
+@group(2) @binding(100) var array_texture: texture_2d_array<f32>;
+@group(2) @binding(101) var array_texture_sampler: sampler;
 
 @fragment
 fn fragment(
@@ -41,9 +29,9 @@ fn fragment(
   let max_grass_level = 5.0;
   let max_rock_level = 10.0;
 
-  let grass = textureSample(grass_texture, grass_sampler, in.uv);
-  let rock = textureSample(rock_texture, rock_sampler, in.uv);
-  let snow = textureSample(snow_texture, snow_sampler, in.uv);
+  let grass = textureSample(array_texture, array_texture_sampler, in.uv, 0);
+  let rock = textureSample(array_texture, array_texture_sampler, in.uv, 1);
+  let snow = textureSample(array_texture, array_texture_sampler, in.uv, 2);
 
   var color = mix(grass, rock, smoothstep(max_grass_level, max_rock_level, height));
   color = mix(color, snow, smoothstep(max_rock_level + 10.0, 40.0, height));
