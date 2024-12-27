@@ -34,6 +34,10 @@ pub struct TerrainExtension {
     #[texture(100, dimension = "2d_array")]
     #[sampler(101)]
     array_texture: Handle<Image>,
+
+    #[texture(102, dimension = "2d", sample_type = "u_int")]
+    #[sampler(103, sampler_type = "non_filtering")]
+    material_index_map: Handle<Image>,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -49,7 +53,8 @@ impl MaterialExtension for TerrainExtension {
 #[derive(Resource)]
 struct LoadingTexture {
     is_loaded: bool,
-    handle: Handle<Image>,
+    array_texture: Handle<Image>,
+    material_index_map: Handle<Image>,
 }
 
 fn create_array_texture(
@@ -60,14 +65,26 @@ fn create_array_texture(
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainExtension>>>,
 ) {
-    if loading_texture.is_loaded || !asset_server.load_state(&loading_texture.handle).is_loaded() {
+    let is_textures_are_loaded = asset_server
+        .load_state(&loading_texture.material_index_map)
+        .is_loaded()
+        && asset_server
+            .load_state(&loading_texture.array_texture)
+            .is_loaded();
+
+    if loading_texture.is_loaded || !is_textures_are_loaded {
         return;
     }
     loading_texture.is_loaded = true;
 
-    if let Some(image) = images.get_mut(&loading_texture.handle) {
-        let array_layers = 3;
+    if let Some(image) = images.get_mut(&loading_texture.array_texture) {
+        let array_layers = 5;
         image.reinterpret_stacked_2d_as_array(array_layers);
+    }
+
+    if let Some(image) = images.get_mut(&loading_texture.material_index_map) {
+        image.texture_descriptor.format = render_resource::TextureFormat::Rgba8Uint;
+        image.sampler = bevy::image::ImageSampler::nearest();
     }
 
     let extension_handle = terrain_materials.add(ExtendedMaterial {
@@ -76,7 +93,8 @@ fn create_array_texture(
             ..Default::default()
         },
         extension: TerrainExtension {
-            array_texture: loading_texture.handle.clone(),
+            array_texture: loading_texture.array_texture.clone(),
+            material_index_map: loading_texture.material_index_map.clone(),
         },
     });
 
@@ -106,7 +124,8 @@ fn setup(
 ) {
     commands.insert_resource(LoadingTexture {
         is_loaded: false,
-        handle: asset_server.load("textures/array_texture.png"),
+        array_texture: asset_server.load("textures/array_texture.png"),
+        material_index_map: asset_server.load("textures/custom_map.png"),
     });
 
     commands.spawn((

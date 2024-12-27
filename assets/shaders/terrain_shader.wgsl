@@ -15,14 +15,24 @@
 }
 #endif
 
-@group(2) @binding(100) var array_texture: texture_2d_array<f32>;
-@group(2) @binding(101) var array_texture_sampler: sampler;
+@group(2) @binding(100)
+var array_texture: texture_2d_array<f32>;
+@group(2) @binding(101) 
+var array_texture_sampler: sampler;
+
+@group(2) @binding(102)
+var material_index_map: texture_2d<u32>;
+@group(2) @binding(103)
+var material_index_sampler: sampler;
 
 @fragment
 fn fragment(
     in: VertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
+  let dims = textureDimensions(array_texture);
+  let num_layers = dims.x;
+
   let height = in.world_position.y;
   var pbr_input = pbr_input_from_standard_material(in, is_front);
 
@@ -35,6 +45,20 @@ fn fragment(
 
   var color = mix(grass, rock, smoothstep(max_grass_level, max_rock_level, height));
   color = mix(color, snow, smoothstep(max_rock_level + 10.0, 40.0, height));
+
+  let material_index = textureLoad(
+    material_index_map,
+    vec2<i32>(floor(in.uv * vec2<f32>(textureDimensions(material_index_map)))),
+    0
+  ).r;
+
+  if (material_index > 0) {
+    color = textureSample(array_texture, array_texture_sampler, in.uv, material_index);
+  }
+
+  // if (material_index > num_layers) {
+  //     color = vec4(1.0, 0.0, 0.0, 1.0);
+  // }
 
   pbr_input.material.base_color = color;
   pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
