@@ -38,6 +38,9 @@ pub struct TerrainExtension {
     #[texture(102, dimension = "2d", sample_type = "u_int")]
     #[sampler(103, sampler_type = "non_filtering")]
     material_index_map: Handle<Image>,
+
+    #[uniform(104)]
+    layers: u32,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -76,10 +79,11 @@ fn create_array_texture(
         return;
     }
     loading_texture.is_loaded = true;
+    let mut layers = 0;
 
     if let Some(image) = images.get_mut(&loading_texture.array_texture) {
-        let array_layers = 5;
-        image.reinterpret_stacked_2d_as_array(array_layers);
+        layers = image.height() / image.width();
+        image.reinterpret_stacked_2d_as_array(layers);
     }
 
     if let Some(image) = images.get_mut(&loading_texture.material_index_map) {
@@ -95,6 +99,7 @@ fn create_array_texture(
         extension: TerrainExtension {
             array_texture: loading_texture.array_texture.clone(),
             material_index_map: loading_texture.material_index_map.clone(),
+            layers,
         },
     });
 
