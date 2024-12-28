@@ -57,13 +57,11 @@ fn fragment(
     0
   ).r;
 
-  if (material_index > 0) {
-    color = textureSample(array_texture, array_texture_sampler, in.uv, material_index);
-  }
+  let use_material_texture = material_index > 0;
+  color = select(color, textureSample(array_texture, array_texture_sampler, in.uv, material_index), use_material_texture);
 
-  if (material_index >= layers) {
-    color = textureSample(array_texture, array_texture_sampler, in.uv, 0); 
-  }
+  let use_default_texture = material_index >= layers;
+  color = select(color, textureSample(array_texture, array_texture_sampler, in.uv, 0), use_default_texture);
 
   pbr_input.material.base_color = color;
   pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
