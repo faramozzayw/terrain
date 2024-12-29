@@ -11,11 +11,12 @@ pub struct Terrain {
 
 type Normal = Vector3<f32>;
 type Position = Vector3<f32>;
+type UV = [f32; 2];
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
     positions: Vec<Position>,
-    uvs: Vec<[f32; 2]>,
+    uvs: Vec<UV>,
     indices: Vec<u32>,
     normals: Vec<Normal>,
     pub chunk_x: usize,
@@ -36,12 +37,9 @@ impl Terrain {
             });
         });
 
-        let chunks = {
-            let mut chunks_guard = chunks.lock().unwrap();
-            std::mem::take(&mut *chunks_guard)
+        let mut terrain = Self {
+            chunks: chunks.into_inner().unwrap(),
         };
-
-        let mut terrain = Self { chunks };
         terrain.stitch_normals();
         terrain
     }
@@ -91,7 +89,7 @@ impl Terrain {
             .map(|(key, normals)| {
                 let average = normals
                     .iter()
-                    .fold(Vector3::zeros(), |acc, n| acc + *n)
+                    .fold(Normal::zeros(), |acc, n| acc + *n)
                     .normalize();
                 (*key, average)
             })
@@ -163,7 +161,7 @@ impl Chunk {
             })
             .unzip();
 
-        let normals = std::sync::Mutex::new(vec![Vector3::default(); size]);
+        let normals = std::sync::Mutex::new(vec![Normal::default(); size]);
 
         let indices: Vec<u32> = (0..mesh_size - 1)
             .flat_map(|i| (0..mesh_size - 1).map(move |j| (i, j)))

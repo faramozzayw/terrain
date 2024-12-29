@@ -45,9 +45,10 @@ fn fragment(
   let rock = textureSample(array_texture, array_texture_sampler, in.uv, 4);
   let snow = textureSample(array_texture, array_texture_sampler, in.uv, 5);
 
-  var color = dirt;
+  var color = sand;
 
-  color = mix(dirt, grass, smoothstep(0.0, max_grass_level, height));
+  color = mix(sand, dirt, smoothstep(-20.0, -10.0, height));
+  color = mix(color, grass, smoothstep(0.0, max_grass_level, height));
   color = mix(color, rock, smoothstep(max_grass_level, max_rock_level, height));
   color = mix(color, snow, smoothstep(max_rock_level + 5.0, 50.0, height));
 
