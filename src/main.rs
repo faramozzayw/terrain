@@ -274,8 +274,6 @@ fn raycast_handle(
                     }
                 });
 
-                dbg!(count);
-
                 if count > 0 {
                     let smoothed_height = sum_heights / count as f32;
                     position[1] = position[1] * (1.0 - strength * falloff)
