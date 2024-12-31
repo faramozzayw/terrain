@@ -1,24 +1,27 @@
-use bevy::prelude::*;
-use nalgebra::Vector3;
+use bevy::{
+    prelude::*,
+    render::{
+        mesh::{Indices, PrimitiveTopology},
+        render_asset::RenderAssetUsages,
+    },
+};
 use rayon::prelude::*;
 use std::collections::HashMap;
-
-use crate::utils::{create_mesh, update_normals};
 
 pub struct Terrain {
     pub chunks: Vec<Chunk>,
 }
 
-type Normal = Vector3<f32>;
-type Position = Vector3<f32>;
+type Normal = Vec3;
+type Position = Vec3;
 type UV = [f32; 2];
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
-    positions: Vec<Position>,
-    uvs: Vec<UV>,
-    indices: Vec<u32>,
-    normals: Vec<Normal>,
+    pub positions: Vec<Position>,
+    pub uvs: Vec<UV>,
+    pub indices: Vec<usize>,
+    pub normals: Vec<Normal>,
     pub chunk_x: usize,
     pub chunk_y: usize,
 }
@@ -89,7 +92,7 @@ impl Terrain {
             .map(|(key, normals)| {
                 let average = normals
                     .iter()
-                    .fold(Normal::zeros(), |acc, n| acc + *n)
+                    .fold(Normal::ZERO, |acc, n| acc + *n)
                     .normalize();
                 (*key, average)
             })
@@ -112,6 +115,14 @@ impl Chunk {
     pub const CHUNK_SIZE: usize = 128;
 
     #[inline]
+    pub fn face_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+        let u = b - a;
+        let v = c - a;
+
+        u.cross(v)
+    }
+
+    #[inline]
     pub fn get_world_space_position(&self, position: &Position) -> (usize, usize) {
         let x = self.chunk_x * Chunk::CHUNK_SIZE + position.x as usize;
         let y = self.chunk_y * Chunk::CHUNK_SIZE + position.z as usize;
@@ -126,8 +137,25 @@ impl Chunk {
 
         let positions = self.positions.into_par_iter().map(Into::into).collect();
         let normals = self.normals.into_par_iter().map(Into::into).collect();
+        let indices = self.indices.into_par_iter().map(|v| v as u32).collect();
 
-        create_mesh(positions, normals, self.uvs, self.indices)
+        Self::create_mesh(positions, normals, self.uvs, indices)
+    }
+
+    #[inline]
+    fn create_mesh(
+        positions: Vec<[f32; 3]>,
+        normals: Vec<[f32; 3]>,
+        uvs: Vec<[f32; 2]>,
+        indices: Vec<u32>,
+    ) -> Mesh {
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        mesh.insert_indices(Indices::U32(indices));
+
+        mesh
     }
 
     pub fn generate(
@@ -155,36 +183,36 @@ impl Chunk {
                     * Terrain::MAX_HEIGHT;
 
                 (
-                    Vector3::new(j as f32, height, i as f32),
+                    Vec3::new(j as f32, height, i as f32),
                     [j as f32 * inv_size_minus_1, i as f32 * inv_size_minus_1],
                 )
             })
             .unzip();
 
-        let normals = std::sync::Mutex::new(vec![Normal::default(); size]);
-
-        let indices: Vec<u32> = (0..mesh_size - 1)
-            .flat_map(|i| (0..mesh_size - 1).map(move |j| (i, j)))
-            .collect::<Vec<_>>()
+        let indices: Vec<_> = (0..(mesh_size - 1) * (mesh_size - 1))
             .into_par_iter()
-            .flat_map(|(i, j)| {
+            .flat_map(|index| {
+                let i = index / (mesh_size - 1);
+                let j = index % (mesh_size - 1);
+
                 let i0 = mesh_size * i + j;
                 let i1 = i0 + 1;
                 let i2 = mesh_size * (i + 1) + j;
                 let i3 = i2 + 1;
 
-                let mut normals = normals.lock().unwrap();
-                update_normals((i0, i2, i1), &positions, &mut normals);
-                update_normals((i1, i2, i3), &positions, &mut normals);
-
-                vec![
-                    i0 as u32, i2 as u32, i1 as u32, // First triangle
-                    i1 as u32, i2 as u32, i3 as u32, // Second triangle
-                ]
+                [i0, i2, i1, i1, i2, i3] // First and second triangles
             })
             .collect();
 
-        let normals = normals.into_inner().unwrap();
+        let mut normals = vec![Normal::default(); size];
+
+        indices.chunks_exact(3).for_each(|indices| {
+            let (a, b, c) = (indices[0], indices[1], indices[2]);
+            let normal = Self::face_normal(positions[a], positions[b], positions[c]);
+            normals[a] += normal;
+            normals[b] += normal;
+            normals[c] += normal;
+        });
 
         Self {
             positions,
@@ -200,11 +228,10 @@ impl Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::Vector3;
 
     fn create_mock_chunk(
-        positions: Vec<Vector3<f32>>,
-        normals: Vec<Vector3<f32>>,
+        positions: Vec<Vec3>,
+        normals: Vec<Vec3>,
         chunk_x: usize,
         chunk_y: usize,
     ) -> Chunk {
@@ -223,25 +250,25 @@ mod tests {
     #[test]
     fn test_stitch_normals() {
         let positions_chunk1 = vec![
-            Vector3::new(0.0, 1.0, 0.0), // Vertex at (0, 0)
-            Vector3::new(1.0, 1.0, 0.0), // Vertex at (1, 0)
-            Vector3::new(0.0, 1.0, 1.0), // Vertex at (0, 1)
+            Vec3::new(0.0, 1.0, 0.0), // Vertex at (0, 0)
+            Vec3::new(1.0, 1.0, 0.0), // Vertex at (1, 0)
+            Vec3::new(0.0, 1.0, 1.0), // Vertex at (0, 1)
         ];
         let normals_chunk1 = vec![
-            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (0, 0)
-            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 0)
-            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (0, 1)
+            Vec3::new(0.0, 1.0, 0.0), // Normal for vertex (0, 0)
+            Vec3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 0)
+            Vec3::new(0.0, 1.0, 0.0), // Normal for vertex (0, 1)
         ];
 
         let positions_chunk2 = vec![
-            Vector3::new(1.0, 2.0, 0.0), // Vertex at (1, 0)
-            Vector3::new(2.0, 2.0, 0.0), // Vertex at (2, 0)
-            Vector3::new(1.0, 2.0, 1.0), // Vertex at (1, 1)
+            Vec3::new(1.0, 2.0, 0.0), // Vertex at (1, 0)
+            Vec3::new(2.0, 2.0, 0.0), // Vertex at (2, 0)
+            Vec3::new(1.0, 2.0, 1.0), // Vertex at (1, 1)
         ];
         let normals_chunk2 = vec![
-            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 0)
-            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (2, 0)
-            Vector3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 1)
+            Vec3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 0)
+            Vec3::new(0.0, 1.0, 0.0), // Normal for vertex (2, 0)
+            Vec3::new(0.0, 1.0, 0.0), // Normal for vertex (1, 1)
         ];
 
         let chunk1 = create_mock_chunk(positions_chunk1, normals_chunk1, 0, 0);
@@ -257,13 +284,13 @@ mod tests {
         let chunk1_normals = &terrain.chunks[0].normals;
         let chunk2_normals = &terrain.chunks[1].normals;
 
-        assert_eq!(chunk1_normals[1], Vector3::new(0.0, 1.0, 0.0)); // Vertex (1, 0) in chunk1
-        assert_eq!(chunk2_normals[0], Vector3::new(0.0, 1.0, 0.0)); // Vertex (1, 0) in chunk2
+        assert_eq!(chunk1_normals[1], Vec3::new(0.0, 1.0, 0.0)); // Vertex (1, 0) in chunk1
+        assert_eq!(chunk2_normals[0], Vec3::new(0.0, 1.0, 0.0)); // Vertex (1, 0) in chunk2
 
         // For vertex (0, 1) in chunk1, it should remain the same
-        assert_eq!(chunk1_normals[2], Vector3::new(0.0, 1.0, 0.0)); // Vertex (0, 1) in chunk1
+        assert_eq!(chunk1_normals[2], Vec3::new(0.0, 1.0, 0.0)); // Vertex (0, 1) in chunk1
 
         // For vertex (2, 0) in chunk2, it should remain the same
-        assert_eq!(chunk2_normals[1], Vector3::new(0.0, 1.0, 0.0)); // Vertex (2, 0) in chunk2
+        assert_eq!(chunk2_normals[1], Vec3::new(0.0, 1.0, 0.0)); // Vertex (2, 0) in chunk2
     }
 }

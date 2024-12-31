@@ -8,10 +8,14 @@ use bevy::{
     pbr::{ExtendedMaterial, MaterialExtension},
     picking::{backend::ray::RayMap, mesh_picking::ray_cast::RayMeshHit},
     prelude::*,
-    render::render_resource::{self, AsBindGroup},
+    render::{
+        mesh::VertexAttributeValues,
+        render_resource::{self, AsBindGroup},
+    },
 };
 use bevy_flycam::{MovementSettings, PlayerPlugin};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use itertools::Itertools;
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use terrain::{Chunk, Terrain};
 use utils::parse_heightmap;
@@ -22,6 +26,7 @@ fn main() {
         .add_plugins(PlayerPlugin)
         .add_plugins(WorldInspectorPlugin::new())
         .add_systems(Startup, setup)
+        .add_event::<RecalculateNormals>()
         .add_systems(
             Update,
             (
@@ -30,8 +35,10 @@ fn main() {
                 raycast.pipe(raycast_handle).pipe(pipe_noop_option),
             ),
         )
-        .insert_resource(Config::default())
-        .register_type::<Config>()
+        .add_systems(Update, recalculate_normals_for_chunk.pipe(pipe_noop_option))
+        .insert_resource(BrushConfig::default())
+        .register_type::<BrushConfig>()
+        .register_type::<ChunkMetadata>()
         .insert_resource(MovementSettings {
             sensitivity: 0.00015,
             speed: 60.0,
@@ -71,6 +78,23 @@ struct LoadingTerrainTexture {
     is_loaded: bool,
     array_texture: Handle<Image>,
     material_index_map: Handle<Image>,
+}
+
+#[derive(Debug, Component, PartialEq, Eq, Reflect)]
+#[reflect(Component)]
+pub struct ChunkMetadata {
+    x: usize,
+    y: usize,
+}
+
+impl ChunkMetadata {
+    pub fn new(x: usize, y: usize) -> Self {
+        Self { x, y }
+    }
+
+    pub fn vec2(&self) -> Vec2 {
+        Vec2::new(self.x as f32, self.y as f32)
+    }
 }
 
 fn create_array_texture(
@@ -122,60 +146,44 @@ fn create_array_texture(
     let terrain = Terrain::generate_chunks(&heightmap, num_chunks);
 
     for chunk in &terrain.chunks {
-        let x = (chunk.chunk_x * Chunk::CHUNK_SIZE) as f32;
-        let z = (chunk.chunk_y * Chunk::CHUNK_SIZE) as f32;
-
         commands.spawn((
-            Name::new(format!("Chunk [{x},{z}]")),
+            Name::new(format!("Chunk {}x{}", chunk.chunk_x, chunk.chunk_y)),
             Mesh3d(meshes.add(chunk.clone().into_mesh())),
+            ChunkMetadata::new(chunk.chunk_x, chunk.chunk_y),
             MeshMaterial3d(extension_handle.clone()),
-            Transform::from_xyz(x, 0.0, z),
+            Transform::from_xyz(
+                (chunk.chunk_x * Chunk::CHUNK_SIZE) as f32,
+                0.0,
+                (chunk.chunk_y * Chunk::CHUNK_SIZE) as f32,
+            ),
         ));
     }
 }
 
-fn raycast(
-    mut ray_cast: MeshRayCast,
-    mut _gizmos: Gizmos,
-    ray_map: Res<RayMap>,
-    keys: Res<ButtonInput<MouseButton>>,
-) -> Option<(Entity, RayMeshHit)> {
-    if !keys.pressed(MouseButton::Left) {
-        return None;
-    }
-
-    for (_, ray) in ray_map.iter() {
-        let Some((entity, hit)) = ray_cast.cast_ray(*ray, &RayCastSettings::default()).first()
-        else {
-            continue;
-        };
-
-        return Some((*entity, hit.clone()));
-    }
-
-    None
-}
-
 #[derive(Debug, Resource, Reflect)]
 #[reflect(Resource)]
-pub struct Config {
+pub struct BrushConfig {
     pub range: f32,
     pub strength: f32,
     pub kind: BrushKind,
+    pub offset: Vec2,
     /// 0.1 to 0.5: Gentle falloff (spread effect widely).
     /// 1.0: Linear falloff (balanced).
     /// 2.0 to 5.0: Steep falloff (concentrated near the center).
     #[reflect(@RangeFrom::<f32> { start: 0.0 })]
     pub falloff_exponent: f32,
+    pub flatten_level: Option<f32>,
 }
 
-impl Default for Config {
+impl Default for BrushConfig {
     fn default() -> Self {
         Self {
-            range: 20.0,
+            range: 150.0,
             strength: 1.0,
+            offset: Vec2::ZERO,
             kind: BrushKind::Sculp,
             falloff_exponent: 1.0,
+            flatten_level: None,
         }
     }
 }
@@ -187,43 +195,128 @@ pub enum BrushKind {
     Smooth,
 }
 
+fn raycast(
+    mut ray_cast: MeshRayCast,
+    ray_map: Res<RayMap>,
+    keys: Res<ButtonInput<MouseButton>>,
+    mut config: ResMut<BrushConfig>,
+    mut gizmos: Gizmos,
+) -> Option<(Entity, RayMeshHit)> {
+    for (_, ray) in ray_map.iter() {
+        let Some((entity, hit)) = ray_cast.cast_ray(*ray, &RayCastSettings::default()).first()
+        else {
+            continue;
+        };
+
+        gizmos
+            .circle(
+                Isometry3d::new(hit.point, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
+                config.range,
+                bevy::color::palettes::css::NAVY,
+            )
+            .resolution(64);
+
+        if !keys.pressed(MouseButton::Left) {
+            config.flatten_level = None;
+            return None;
+        }
+
+        return Some((*entity, hit.clone()));
+    }
+
+    None
+}
+
 fn raycast_handle(
     In(maybe_hit): In<Option<(Entity, RayMeshHit)>>,
     mesh_3d: Query<(&GlobalTransform, &Mesh3d)>,
+    metadata: Query<(Entity, &ChunkMetadata)>,
     mut meshes: ResMut<Assets<Mesh>>,
-    config: Res<Config>,
+    mut config: ResMut<BrushConfig>,
+    mut recalculate_normals: EventWriter<RecalculateNormals>,
 ) -> Option<()> {
     let (entity, hit) = maybe_hit?;
-    let (chunk_gt, chunk) = mesh_3d.get(entity).ok()?;
+    let (chunk_gt, _) = mesh_3d.get(entity).ok()?;
+    let center_position = chunk_gt.affine().inverse().transform_point3(hit.point);
+    let center_vec2 = hit.point.xz();
+
+    if matches!(config.kind, BrushKind::Flatten) && config.flatten_level.is_none() {
+        config.flatten_level = Some(center_position.y);
+    }
+
+    let grid_size = 4;
+    let half_square = (Chunk::CHUNK_SIZE as f32) / 2.0;
+    let half_diagonal = (half_square * 2.0_f32.sqrt()).ceil();
+    let radius = config.range;
+
+    let entities = (0..grid_size)
+        .flat_map(|i| {
+            (0..grid_size).filter_map(move |j| {
+                let square_center = Vec2::new(
+                    (i as f32 + 0.5) * Chunk::CHUNK_SIZE as f32,
+                    (j as f32 + 0.5) * Chunk::CHUNK_SIZE as f32,
+                );
+                let vector_to_square = center_vec2 - square_center;
+
+                let distance = (vector_to_square.x * vector_to_square.x
+                    + vector_to_square.y * vector_to_square.y)
+                    .sqrt();
+
+                if distance <= radius + half_diagonal {
+                    return Some((i, j));
+                }
+
+                None
+            })
+        })
+        .filter_map(|(x, y)| {
+            metadata
+                .iter()
+                .find(|(_, metadata)| **metadata == ChunkMetadata::new(x, y))
+                .map(|(e, _)| e)
+        })
+        .collect_vec();
+
+    for entity in entities {
+        let (chunk_gt, chunk) = mesh_3d.get(entity).ok()?;
+        let center = chunk_gt.affine().inverse().transform_point3(hit.point).xz();
+
+        apply_brush(
+            center,
+            entity,
+            &mut meshes,
+            chunk,
+            &config,
+            &mut recalculate_normals,
+        )?;
+    }
+
+    Some(())
+}
+
+fn apply_brush(
+    center: Vec2,
+    entity: Entity,
+    meshes: &mut Assets<Mesh>,
+    chunk: &Mesh3d,
+    config: &BrushConfig,
+    recalculate_normals: &mut EventWriter<'_, RecalculateNormals>,
+) -> Option<()> {
     let chunk_mesh = meshes.get_mut(&chunk.0)?;
-    let positions = match chunk_mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
-        Some(bevy::render::mesh::VertexAttributeValues::Float32x3(positions)) => positions,
+    let positions = match chunk_mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)? {
+        VertexAttributeValues::Float32x3(positions) => positions,
         _ => return None,
     };
-
-    let center_position = chunk_gt.affine().inverse().transform_point3(hit.point);
-    let center = center_position.xz();
-    let Config {
-        range,
-        strength,
-        kind,
-        falloff_exponent,
-        ..
-    } = *config;
-    let falloff_exponent = falloff_exponent.max(0.1);
-
-    let radius_squared = range * range;
-    let snapshot = positions.clone();
-    let mut grid: HashMap<(i32, i32), Vec<&[f32; 3]>> = HashMap::with_capacity(snapshot.len());
-
-    snapshot.iter().for_each(|pos| {
+    let falloff_exponent = config.falloff_exponent.max(0.1);
+    let radius_squared = config.range * config.range;
+    let mut grid: HashMap<(i32, i32), Vec<[f32; 3]>> = HashMap::with_capacity(positions.len());
+    positions.iter().for_each(|pos| {
         let cell = (
-            (pos[0] / range).floor() as i32,
-            (pos[2] / range).floor() as i32,
+            (pos[0] / config.range).floor() as i32,
+            (pos[2] / config.range).floor() as i32,
         );
-        grid.entry(cell).or_default().push(pos);
+        grid.entry(cell).or_default().push(*pos);
     });
-
     positions
         .par_iter_mut()
         .filter_map(|position| {
@@ -232,7 +325,7 @@ fn raycast_handle(
 
             if distance_squared <= radius_squared {
                 let distance = distance_squared.sqrt();
-                let normalized_distance = (distance / range).min(1.0); // Normalize to [0, 1]
+                let normalized_distance = (distance / config.range).min(1.0); // Normalize to [0, 1]
                 let falloff = (1.0 - normalized_distance).powf(falloff_exponent);
 
                 Some((position, falloff))
@@ -240,19 +333,20 @@ fn raycast_handle(
                 None
             }
         })
-        .for_each(|(position, falloff)| match kind {
+        .for_each(|(position, falloff)| match config.kind {
             BrushKind::Sculp => {
-                position[1] += strength * falloff;
+                position[1] += config.strength * falloff;
             }
             BrushKind::Flatten => {
-                position[1] = position[1] * (1.0 - falloff) + center_position.y * falloff;
+                let target_y = config.flatten_level.unwrap();
+                position[1] = position[1] * (1.0 - falloff) + target_y * falloff;
             }
             BrushKind::Smooth => {
                 let this = Vec2::new(position[0], position[2]);
 
                 let cell = (
-                    (this.x / range).floor() as i32,
-                    (this.y / range).floor() as i32,
+                    (this.x / config.range).floor() as i32,
+                    (this.y / config.range).floor() as i32,
                 );
 
                 // This code generates a 3x3 grid of neighboring cells around a target cell `(cell.0, cell.1)`.
@@ -276,18 +370,56 @@ fn raycast_handle(
 
                 if count > 0 {
                     let smoothed_height = sum_heights / count as f32;
-                    position[1] = position[1] * (1.0 - strength * falloff)
-                        + smoothed_height * (strength * falloff);
+                    position[1] = position[1] * (1.0 - config.strength * falloff)
+                        + smoothed_height * (config.strength * falloff);
                 }
             }
         });
 
-    chunk_mesh.compute_normals();
+    recalculate_normals.send(RecalculateNormals(entity));
 
     Some(())
 }
 
-fn change_brush_kind(mut config: ResMut<Config>, keys: Res<ButtonInput<KeyCode>>) {
+#[derive(Debug, Event, PartialEq, Eq, Hash, Deref)]
+pub struct RecalculateNormals(Entity);
+
+// fix/todo: this is kinda fucked up, but fine for now
+fn recalculate_normals_for_chunk(
+    mut recalculate_normals: EventReader<RecalculateNormals>,
+    mesh_3d: Query<&Mesh3d>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut local_timer: Local<Timer>,
+    time: Res<Time>,
+) -> Option<()> {
+    if local_timer.duration().as_nanos() == 0 {
+        local_timer.set_duration(std::time::Duration::from_secs_f32(0.05));
+        local_timer.set_mode(TimerMode::Repeating);
+        return Some(());
+    }
+    if local_timer.finished() {
+        local_timer.reset();
+    } else {
+        local_timer.tick(time.delta());
+        return Some(());
+    }
+
+    let chunks_entities = recalculate_normals
+        .read()
+        .unique()
+        .map(std::ops::Deref::deref)
+        .collect_vec();
+
+    for entity in chunks_entities {
+        let chunk = mesh_3d.get(*entity).ok()?;
+        let chunk_mesh = meshes.get_mut(&chunk.0)?;
+        chunk_mesh.compute_normals();
+    }
+
+    Some(())
+}
+
+fn change_brush_kind(mut config: ResMut<BrushConfig>, keys: Res<ButtonInput<KeyCode>>) {
     if keys.just_pressed(KeyCode::Digit1) {
         config.kind = BrushKind::Sculp;
     }
@@ -301,11 +433,11 @@ fn change_brush_kind(mut config: ResMut<Config>, keys: Res<ButtonInput<KeyCode>>
     }
 
     if keys.pressed(KeyCode::PageUp) {
-        config.range += 0.1;
+        config.range += 0.25;
     }
 
     if keys.pressed(KeyCode::PageDown) {
-        config.range -= 0.1;
+        config.range -= 0.25;
     }
 }
 
@@ -315,8 +447,13 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut config_store: ResMut<GizmoConfigStore>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    for (_, config, _) in config_store.iter_mut() {
+        config.depth_bias = -1.;
+    }
+
     commands.insert_resource(LoadingTerrainTexture {
         is_loaded: false,
         array_texture: asset_server.load("textures/array_texture.png"),

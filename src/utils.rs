@@ -1,13 +1,3 @@
-use bevy::{
-    prelude::*,
-    render::{
-        mesh::{Indices, PrimitiveTopology},
-        render_asset::RenderAssetUsages,
-    },
-};
-
-use nalgebra::Vector3;
-
 pub fn parse_heightmap(path: &str) -> Vec<Vec<f32>> {
     let img = image::open(path)
         .expect("Failed to open heightmap")
@@ -27,44 +17,4 @@ pub fn parse_heightmap(path: &str) -> Vec<Vec<f32>> {
     }
 
     heightmap
-}
-
-#[inline]
-pub fn calculate_normal(
-    vertex_0: Vector3<f32>,
-    vertex_1: Vector3<f32>,
-    vertex_2: Vector3<f32>,
-) -> Vector3<f32> {
-    let u = vertex_1 - vertex_0;
-    let v = vertex_2 - vertex_0;
-
-    u.cross(&v)
-}
-
-#[inline]
-pub fn update_normals(
-    (x, y, z): (usize, usize, usize),
-    positions: &[Vector3<f32>],
-    normals: &mut [Vector3<f32>],
-) {
-    let normal = calculate_normal(positions[x], positions[y], positions[z]);
-    normals[x] += normal;
-    normals[y] += normal;
-    normals[z] += normal;
-}
-
-#[inline]
-pub fn create_mesh(
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    uvs: Vec<[f32; 2]>,
-    indices: Vec<u32>,
-) -> Mesh {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
-
-    mesh
 }

@@ -10,6 +10,6 @@ bevy-inspector-egui = "0.28"
 
 gltf = "1.3"
 image = "0.25"
-nalgebra = { version = "0.33", features = ["rayon"] }
 rayon = "1.10"
+itertools = "0.14"
 

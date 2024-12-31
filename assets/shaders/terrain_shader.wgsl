@@ -64,6 +64,8 @@ fn fragment(
   let use_default_texture = material_index >= layers;
   color = select(color, textureSample(array_texture, array_texture_sampler, in.uv, 0), use_default_texture);
 
+  // color = vec4(1.0);
+
   pbr_input.material.base_color = color;
   pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
