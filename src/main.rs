@@ -1,24 +1,26 @@
 mod terrain;
 mod utils;
 
-use std::{collections::HashMap, ops::RangeFrom};
+use std::{
+    collections::HashMap,
+    ops::{DerefMut, RangeFrom},
+};
 
 use bevy::{
     color::palettes::css::WHITE,
     pbr::{ExtendedMaterial, MaterialExtension},
     picking::{backend::ray::RayMap, mesh_picking::ray_cast::RayMeshHit},
     prelude::*,
-    render::{
-        mesh::VertexAttributeValues,
-        render_resource::{self, AsBindGroup},
-    },
+    render::render_resource::{self, AsBindGroup},
 };
 use bevy_flycam::{MovementSettings, PlayerPlugin};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use itertools::Itertools;
-use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{
+    IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 use terrain::{Chunk, Terrain};
-use utils::parse_heightmap;
+use utils::{get_mut_position_from_mesh, parse_heightmap};
 
 fn main() {
     App::new()
@@ -175,6 +177,18 @@ pub struct BrushConfig {
     pub flatten_level: Option<f32>,
 }
 
+impl BrushConfig {
+    #[inline]
+    pub fn range_squared(&self) -> f32 {
+        self.range * self.range
+    }
+
+    #[inline]
+    pub fn falloff_exponent(&self) -> f32 {
+        self.falloff_exponent.max(0.1)
+    }
+}
+
 impl Default for BrushConfig {
     fn default() -> Self {
         Self {
@@ -244,139 +258,183 @@ fn raycast_handle(
         config.flatten_level = Some(center_position.y);
     }
 
-    let grid_size = 4;
-    let half_square = (Chunk::CHUNK_SIZE as f32) / 2.0;
+    let grid_size = (metadata.iter().count() as f32).sqrt() as usize;
+    let chunk_size_f32 = Chunk::CHUNK_SIZE as f32;
+    let half_square = (chunk_size_f32) / 2.0;
     let half_diagonal = (half_square * 2.0_f32.sqrt()).ceil();
     let radius = config.range;
 
     let entities = (0..grid_size)
         .flat_map(|i| {
             (0..grid_size).filter_map(move |j| {
-                let square_center = Vec2::new(
-                    (i as f32 + 0.5) * Chunk::CHUNK_SIZE as f32,
-                    (j as f32 + 0.5) * Chunk::CHUNK_SIZE as f32,
-                );
-                let vector_to_square = center_vec2 - square_center;
+                let square_center = (Vec2::new(i as f32, j as f32) + 0.5) * chunk_size_f32;
+                let distance = (center_vec2 - square_center).length_squared().sqrt();
 
-                let distance = (vector_to_square.x * vector_to_square.x
-                    + vector_to_square.y * vector_to_square.y)
-                    .sqrt();
-
-                if distance <= radius + half_diagonal {
-                    return Some((i, j));
-                }
-
-                None
+                (distance <= radius + half_diagonal).then_some((i, j))
             })
         })
         .filter_map(|(x, y)| {
             metadata
                 .iter()
-                .find(|(_, metadata)| **metadata == ChunkMetadata::new(x, y))
-                .map(|(e, _)| e)
+                .find_map(|(e, metadata)| ChunkMetadata::new(x, y).eq(metadata).then_some(e))
         })
         .collect_vec();
 
-    for entity in entities {
-        let (chunk_gt, chunk) = mesh_3d.get(entity).ok()?;
-        let center = chunk_gt.affine().inverse().transform_point3(hit.point).xz();
+    // let now = std::time::Instant::now();
 
-        apply_brush(
-            center,
-            entity,
-            &mut meshes,
-            chunk,
-            &config,
-            &mut recalculate_normals,
-        )?;
-    }
+    let meshes_ptr: *mut Assets<Mesh> = meshes.deref_mut();
+
+    entities
+        .iter()
+        .filter_map(|entity| {
+            let (chunk_gt, chunk) = mesh_3d.get(*entity).ok()?;
+            let center = chunk_gt.affine().inverse().transform_point3(hit.point).xz();
+
+            // SAFETY: Each chunk mesh is unique to each chunk entity
+            let chunk_mesh = unsafe {
+                let meshes = &mut *meshes_ptr;
+                meshes.get_mut(&chunk.0)?
+            };
+            Some((center, chunk_mesh))
+        })
+        .collect_vec()
+        .into_par_iter()
+        .map(|(center, chunk_mesh)| apply_brush(center, chunk_mesh, &config))
+        .collect::<Option<Vec<_>>>()?;
+
+    // println!("Dur: {:?}", now.elapsed());
+
+    recalculate_normals.send_batch(entities.into_iter().map(RecalculateNormals));
 
     Some(())
 }
 
-fn apply_brush(
+#[inline]
+fn apply_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) -> Option<()> {
+    match config.kind {
+        BrushKind::Sculp => apply_sculp_brush(center, chunk_mesh, config),
+        BrushKind::Flatten => apply_flatten_brush(center, chunk_mesh, config),
+        BrushKind::Smooth => apply_smooth_brush(center, chunk_mesh, config),
+    }
+}
+
+fn filter_mesh_position<'a>(
+    position: &'a mut [f32; 3],
     center: Vec2,
-    entity: Entity,
-    meshes: &mut Assets<Mesh>,
-    chunk: &Mesh3d,
+    radius_squared: f32,
     config: &BrushConfig,
-    recalculate_normals: &mut EventWriter<'_, RecalculateNormals>,
-) -> Option<()> {
-    let chunk_mesh = meshes.get_mut(&chunk.0)?;
-    let positions = match chunk_mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)? {
-        VertexAttributeValues::Float32x3(positions) => positions,
-        _ => return None,
-    };
-    let falloff_exponent = config.falloff_exponent.max(0.1);
-    let radius_squared = config.range * config.range;
-    let mut grid: HashMap<(i32, i32), Vec<[f32; 3]>> = HashMap::with_capacity(positions.len());
-    positions.iter().for_each(|pos| {
-        let cell = (
-            (pos[0] / config.range).floor() as i32,
-            (pos[2] / config.range).floor() as i32,
-        );
-        grid.entry(cell).or_default().push(*pos);
-    });
+    falloff_exponent: f32,
+) -> Option<(&'a mut [f32; 3], f32)> {
+    let this = Vec2::new(position[0], position[2]);
+    let distance_squared = center.distance_squared(this);
+
+    if distance_squared <= radius_squared {
+        let distance = distance_squared.sqrt();
+        let normalized_distance = (distance / config.range).min(1.0); // Normalize to [0, 1]
+        let falloff = (1.0 - normalized_distance).powf(falloff_exponent);
+
+        Some((position, falloff))
+    } else {
+        None
+    }
+}
+
+fn apply_sculp_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) -> Option<()> {
+    let falloff_exponent = config.falloff_exponent();
+    let radius_squared = config.range_squared();
+
+    get_mut_position_from_mesh(chunk_mesh)?
+        .par_iter_mut()
+        .filter_map(|position| {
+            filter_mesh_position(position, center, radius_squared, config, falloff_exponent)
+        })
+        .for_each(|(position, falloff)| {
+            position[1] += config.strength * falloff;
+        });
+
+    Some(())
+}
+
+fn apply_flatten_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) -> Option<()> {
+    let falloff_exponent = config.falloff_exponent();
+    let radius_squared = config.range_squared();
+
+    get_mut_position_from_mesh(chunk_mesh)?
+        .par_iter_mut()
+        .filter_map(|position| {
+            filter_mesh_position(position, center, radius_squared, config, falloff_exponent)
+        })
+        .for_each(|(position, falloff)| {
+            let target_y = config.flatten_level.unwrap();
+            position[1] = position[1] * (1.0 - falloff) + target_y * falloff;
+        });
+
+    Some(())
+}
+
+// TODO: multichunk
+fn apply_smooth_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) -> Option<()> {
+    let positions = get_mut_position_from_mesh(chunk_mesh)?;
+    let falloff_exponent = config.falloff_exponent();
+    let radius_squared = config.range_squared();
+
+    let grid: HashMap<(i32, i32), Vec<[f32; 3]>> = positions
+        .par_iter()
+        .map(|pos| {
+            let cell = (
+                (pos[0] / config.range).floor() as i32,
+                (pos[2] / config.range).floor() as i32,
+            );
+            (cell, *pos)
+        })
+        .fold(HashMap::new, |mut acc, (cell, pos)| {
+            #[allow(clippy::unwrap_or_default)]
+            acc.entry(cell).or_insert_with(Vec::new).push(pos);
+            acc
+        })
+        .reduce(HashMap::new, |mut acc1, acc2| {
+            acc1.extend(acc2);
+            acc1
+        });
+
     positions
         .par_iter_mut()
         .filter_map(|position| {
-            let this = Vec2::new(position[0], position[2]);
-            let distance_squared = center.distance_squared(this);
-
-            if distance_squared <= radius_squared {
-                let distance = distance_squared.sqrt();
-                let normalized_distance = (distance / config.range).min(1.0); // Normalize to [0, 1]
-                let falloff = (1.0 - normalized_distance).powf(falloff_exponent);
-
-                Some((position, falloff))
-            } else {
-                None
-            }
+            filter_mesh_position(position, center, radius_squared, config, falloff_exponent)
         })
-        .for_each(|(position, falloff)| match config.kind {
-            BrushKind::Sculp => {
-                position[1] += config.strength * falloff;
-            }
-            BrushKind::Flatten => {
-                let target_y = config.flatten_level.unwrap();
-                position[1] = position[1] * (1.0 - falloff) + target_y * falloff;
-            }
-            BrushKind::Smooth => {
-                let this = Vec2::new(position[0], position[2]);
+        .for_each(|(position, falloff)| {
+            let this = Vec2::new(position[0], position[2]);
 
-                let cell = (
-                    (this.x / config.range).floor() as i32,
-                    (this.y / config.range).floor() as i32,
-                );
+            let cell = (
+                (this.x / config.range).floor() as i32,
+                (this.y / config.range).floor() as i32,
+            );
 
-                // This code generates a 3x3 grid of neighboring cells around a target cell `(cell.0, cell.1)`.
-                // The range `(-1..=1)` produces offsets for both the x and z axes, covering the target cell and its 8 neighbors.
-                // For each `(dx, dz)` pair, we compute the new coordinates `(cell.0 + dx, cell.1 + dz)` and return them.
-                // The result is a list of all neighboring cells (including the target cell itself) within a 3x3 grid.
-                let neighbors = (-1..=1)
-                    .flat_map(|dx| (-1..=1).map(move |dz| (cell.0 + dx, cell.1 + dz)))
-                    .flat_map(|neighbor_cell| grid.get(&neighbor_cell).into_iter().flatten());
+            // This code generates a 3x3 grid of neighboring cells around a target cell `(cell.0, cell.1)`.
+            // The range `(-1..=1)` produces offsets for both the x and z axes, covering the target cell and its 8 neighbors.
+            // For each `(dx, dz)` pair, we compute the new coordinates `(cell.0 + dx, cell.1 + dz)` and return them.
+            // The result is a list of all neighboring cells (including the target cell itself) within a 3x3 grid.
+            let neighbors = (-1..=1)
+                .flat_map(|dx| (-1..=1).map(move |dz| (cell.0 + dx, cell.1 + dz)))
+                .flat_map(|neighbor_cell| grid.get(&neighbor_cell).into_iter().flatten());
 
-                let mut sum_heights = 0.0;
-                let mut count = 0;
+            let mut sum_heights = 0.0;
+            let mut count = 0;
 
-                neighbors.for_each(|neighbor| {
-                    let neighbor_pos = Vec2::new(neighbor[0], neighbor[2]);
-                    if this.distance_squared(neighbor_pos) <= radius_squared {
-                        sum_heights += neighbor[1];
-                        count += 1;
-                    }
-                });
-
-                if count > 0 {
-                    let smoothed_height = sum_heights / count as f32;
-                    position[1] = position[1] * (1.0 - config.strength * falloff)
-                        + smoothed_height * (config.strength * falloff);
+            neighbors.for_each(|neighbor| {
+                let neighbor_pos = Vec2::new(neighbor[0], neighbor[2]);
+                if this.distance_squared(neighbor_pos) <= radius_squared {
+                    sum_heights += neighbor[1];
+                    count += 1;
                 }
+            });
+
+            if count > 0 {
+                let smoothed_height = sum_heights / count as f32;
+                position[1] = position[1] * (1.0 - config.strength * falloff)
+                    + smoothed_height * (config.strength * falloff);
             }
         });
-
-    recalculate_normals.send(RecalculateNormals(entity));
 
     Some(())
 }
@@ -384,7 +442,7 @@ fn apply_brush(
 #[derive(Debug, Event, PartialEq, Eq, Hash, Deref)]
 pub struct RecalculateNormals(Entity);
 
-// fix/todo: this is kinda fucked up, but fine for now
+// TODO: this is kinda fucked up, but fine for now
 fn recalculate_normals_for_chunk(
     mut recalculate_normals: EventReader<RecalculateNormals>,
     mesh_3d: Query<&Mesh3d>,

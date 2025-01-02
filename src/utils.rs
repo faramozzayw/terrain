@@ -1,3 +1,6 @@
+use bevy::prelude::*;
+use bevy::render::mesh::VertexAttributeValues;
+
 pub fn parse_heightmap(path: &str) -> Vec<Vec<f32>> {
     let img = image::open(path)
         .expect("Failed to open heightmap")
@@ -17,4 +20,11 @@ pub fn parse_heightmap(path: &str) -> Vec<Vec<f32>> {
     }
 
     heightmap
+}
+
+pub fn get_mut_position_from_mesh(chunk_mesh: &mut Mesh) -> Option<&mut Vec<[f32; 3]>> {
+    match chunk_mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)? {
+        VertexAttributeValues::Float32x3(positions) => Some(positions),
+        _ => None,
+    }
 }
