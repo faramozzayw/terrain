@@ -16,8 +16,11 @@ use bevy::{
 use bevy_flycam::{MovementSettings, PlayerPlugin};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use itertools::Itertools;
-use rayon::iter::{
-    IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+use rayon::{
+    iter::{
+        IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+    },
+    slice::ParallelSliceMut,
 };
 use terrain::{Chunk, Terrain};
 use utils::{get_mut_position_from_mesh, parse_heightmap};
@@ -168,7 +171,6 @@ pub struct BrushConfig {
     pub range: f32,
     pub strength: f32,
     pub kind: BrushKind,
-    pub offset: Vec2,
     /// 0.1 to 0.5: Gentle falloff (spread effect widely).
     /// 1.0: Linear falloff (balanced).
     /// 2.0 to 5.0: Steep falloff (concentrated near the center).
@@ -194,7 +196,6 @@ impl Default for BrushConfig {
         Self {
             range: 150.0,
             strength: 1.0,
-            offset: Vec2::ZERO,
             kind: BrushKind::Sculp,
             falloff_exponent: 1.0,
             flatten_level: None,
@@ -260,27 +261,28 @@ fn raycast_handle(
 
     let grid_size = (metadata.iter().count() as f32).sqrt() as usize;
     let chunk_size_f32 = Chunk::CHUNK_SIZE as f32;
-    let half_square = (chunk_size_f32) / 2.0;
+    let half_square = chunk_size_f32 / 2.0;
     let half_diagonal = (half_square * 2.0_f32.sqrt()).ceil();
     let radius = config.range;
 
     let entities = (0..grid_size)
-        .flat_map(|i| {
-            (0..grid_size).filter_map(move |j| {
-                let square_center = (Vec2::new(i as f32, j as f32) + 0.5) * chunk_size_f32;
-                let distance = (center_vec2 - square_center).length_squared().sqrt();
+        .flat_map(|ref i| {
+            (0..grid_size)
+                .filter_map(|j| {
+                    let square_center = (Vec2::new(*i as f32, j as f32) + 0.5) * chunk_size_f32;
+                    let distance = (center_vec2 - square_center).length_squared().sqrt();
 
-                (distance <= radius + half_diagonal).then_some((i, j))
-            })
-        })
-        .filter_map(|(x, y)| {
-            metadata
-                .iter()
-                .find_map(|(e, metadata)| ChunkMetadata::new(x, y).eq(metadata).then_some(e))
+                    if distance <= radius + half_diagonal {
+                        metadata.iter().find_map(|(e, metadata)| {
+                            ChunkMetadata::new(*i, j).eq(metadata).then_some(e)
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect_vec()
         })
         .collect_vec();
-
-    // let now = std::time::Instant::now();
 
     let meshes_ptr: *mut Assets<Mesh> = meshes.deref_mut();
 
@@ -302,8 +304,6 @@ fn raycast_handle(
         .map(|(center, chunk_mesh)| apply_brush(center, chunk_mesh, &config))
         .collect::<Option<Vec<_>>>()?;
 
-    // println!("Dur: {:?}", now.elapsed());
-
     recalculate_normals.send_batch(entities.into_iter().map(RecalculateNormals));
 
     Some(())
@@ -318,20 +318,19 @@ fn apply_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) -> Opt
     }
 }
 
-fn filter_mesh_position<'a>(
-    position: &'a mut [f32; 3],
+fn filter_mesh_position(
+    position: &mut [f32; 3],
     center: Vec2,
     radius_squared: f32,
-    config: &BrushConfig,
+    inv_range_squared: f32,
     falloff_exponent: f32,
-) -> Option<(&'a mut [f32; 3], f32)> {
+) -> Option<(&mut [f32; 3], f32)> {
     let this = Vec2::new(position[0], position[2]);
     let distance_squared = center.distance_squared(this);
 
     if distance_squared <= radius_squared {
-        let distance = distance_squared.sqrt();
-        let normalized_distance = (distance / config.range).min(1.0); // Normalize to [0, 1]
-        let falloff = (1.0 - normalized_distance).powf(falloff_exponent);
+        let normalized_distance_squared = (distance_squared * inv_range_squared).min(1.0); // Normalize to [0, 1] squared
+        let falloff = (1.0 - normalized_distance_squared).powf(falloff_exponent * 0.5);
 
         Some((position, falloff))
     } else {
@@ -342,15 +341,31 @@ fn filter_mesh_position<'a>(
 fn apply_sculp_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) -> Option<()> {
     let falloff_exponent = config.falloff_exponent();
     let radius_squared = config.range_squared();
+    let inv_range_squared = 1.0 / radius_squared;
+
+    let now = std::time::Instant::now();
 
     get_mut_position_from_mesh(chunk_mesh)?
-        .par_iter_mut()
-        .filter_map(|position| {
-            filter_mesh_position(position, center, radius_squared, config, falloff_exponent)
-        })
-        .for_each(|(position, falloff)| {
-            position[1] += config.strength * falloff;
+        .par_chunks_mut(500)
+        .for_each(|chunk| {
+            // TODO: merge iterators
+            chunk
+                .iter_mut()
+                .filter_map(|position| {
+                    filter_mesh_position(
+                        position,
+                        center,
+                        radius_squared,
+                        inv_range_squared,
+                        falloff_exponent,
+                    )
+                })
+                .for_each(|(position, falloff)| {
+                    position[1] += config.strength * falloff;
+                });
         });
+
+    println!("for_each: {:?}", now.elapsed());
 
     Some(())
 }
@@ -358,15 +373,27 @@ fn apply_sculp_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) 
 fn apply_flatten_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) -> Option<()> {
     let falloff_exponent = config.falloff_exponent();
     let radius_squared = config.range_squared();
+    let inv_range_squared = 1.0 / radius_squared;
 
     get_mut_position_from_mesh(chunk_mesh)?
-        .par_iter_mut()
-        .filter_map(|position| {
-            filter_mesh_position(position, center, radius_squared, config, falloff_exponent)
-        })
-        .for_each(|(position, falloff)| {
-            let target_y = config.flatten_level.unwrap();
-            position[1] = position[1] * (1.0 - falloff) + target_y * falloff;
+        .par_chunks_mut(500)
+        .for_each(|chunk| {
+            // TODO: merge iterators
+            chunk
+                .iter_mut()
+                .filter_map(|position| {
+                    filter_mesh_position(
+                        position,
+                        center,
+                        radius_squared,
+                        inv_range_squared,
+                        falloff_exponent,
+                    )
+                })
+                .for_each(|(position, falloff)| {
+                    let target_y = config.flatten_level.unwrap();
+                    position[1] = position[1] * (1.0 - falloff) + target_y * falloff;
+                });
         });
 
     Some(())
@@ -377,6 +404,7 @@ fn apply_smooth_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig)
     let positions = get_mut_position_from_mesh(chunk_mesh)?;
     let falloff_exponent = config.falloff_exponent();
     let radius_squared = config.range_squared();
+    let inv_range_squared = 1.0 / radius_squared;
 
     let grid: HashMap<(i32, i32), Vec<[f32; 3]>> = positions
         .par_iter()
@@ -393,14 +421,24 @@ fn apply_smooth_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig)
             acc
         })
         .reduce(HashMap::new, |mut acc1, acc2| {
-            acc1.extend(acc2);
+            for (key, mut value) in acc2 {
+                acc1.entry(key)
+                    .and_modify(|v| v.append(&mut value)) // Combine vectors for common keys
+                    .or_insert(value);
+            }
             acc1
         });
 
     positions
         .par_iter_mut()
         .filter_map(|position| {
-            filter_mesh_position(position, center, radius_squared, config, falloff_exponent)
+            filter_mesh_position(
+                position,
+                center,
+                radius_squared,
+                inv_range_squared,
+                falloff_exponent,
+            )
         })
         .for_each(|(position, falloff)| {
             let this = Vec2::new(position[0], position[2]);
@@ -419,7 +457,7 @@ fn apply_smooth_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig)
                 .flat_map(|neighbor_cell| grid.get(&neighbor_cell).into_iter().flatten());
 
             let mut sum_heights = 0.0;
-            let mut count = 0;
+            let mut count = 0usize;
 
             neighbors.for_each(|neighbor| {
                 let neighbor_pos = Vec2::new(neighbor[0], neighbor[2]);
@@ -429,7 +467,7 @@ fn apply_smooth_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig)
                 }
             });
 
-            if count > 0 {
+            if count != 0 {
                 let smoothed_height = sum_heights / count as f32;
                 position[1] = position[1] * (1.0 - config.strength * falloff)
                     + smoothed_height * (config.strength * falloff);
