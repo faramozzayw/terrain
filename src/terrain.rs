@@ -112,7 +112,7 @@ impl Terrain {
 }
 
 impl Chunk {
-    pub const CHUNK_SIZE: usize = 128;
+    pub const SIZE: usize = 128;
 
     #[inline]
     pub fn face_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
@@ -124,8 +124,8 @@ impl Chunk {
 
     #[inline]
     pub fn get_world_space_position(&self, position: &Position) -> (usize, usize) {
-        let x = self.chunk_x * Chunk::CHUNK_SIZE + position.x as usize;
-        let y = self.chunk_y * Chunk::CHUNK_SIZE + position.z as usize;
+        let x = self.chunk_x * Chunk::SIZE + position.x as usize;
+        let y = self.chunk_y * Chunk::SIZE + position.z as usize;
 
         (x, y)
     }
@@ -163,9 +163,9 @@ impl Chunk {
         original_chunk_x: usize,
         original_chunk_y: usize,
     ) -> Self {
-        let chunk_x = original_chunk_x * Self::CHUNK_SIZE;
-        let chunk_y = original_chunk_y * Self::CHUNK_SIZE;
-        let mesh_size = Self::CHUNK_SIZE + 1;
+        let chunk_x = original_chunk_x * Self::SIZE;
+        let chunk_y = original_chunk_y * Self::SIZE;
+        let mesh_size = Self::SIZE + 1;
         let size = mesh_size * mesh_size;
 
         let inv_size_minus_1 = 1.0 / (mesh_size - 1) as f32;

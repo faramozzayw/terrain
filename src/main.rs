@@ -146,7 +146,7 @@ fn create_array_texture(
     });
 
     let heightmap = parse_heightmap("assets/heightmap2.png");
-    let num_chunks = heightmap.len() / Chunk::CHUNK_SIZE;
+    let num_chunks = heightmap.len() / Chunk::SIZE;
 
     let terrain = Terrain::generate_chunks(&heightmap, num_chunks);
 
@@ -157,9 +157,9 @@ fn create_array_texture(
             ChunkMetadata::new(chunk.chunk_x, chunk.chunk_y),
             MeshMaterial3d(extension_handle.clone()),
             Transform::from_xyz(
-                (chunk.chunk_x * Chunk::CHUNK_SIZE) as f32,
+                (chunk.chunk_x * Chunk::SIZE) as f32,
                 0.0,
-                (chunk.chunk_y * Chunk::CHUNK_SIZE) as f32,
+                (chunk.chunk_y * Chunk::SIZE) as f32,
             ),
         ));
     }
@@ -260,7 +260,7 @@ fn raycast_handle(
     }
 
     let grid_size = (metadata.iter().count() as f32).sqrt() as usize;
-    let chunk_size_f32 = Chunk::CHUNK_SIZE as f32;
+    let chunk_size_f32 = Chunk::SIZE as f32;
     let half_square = chunk_size_f32 / 2.0;
     let half_diagonal = (half_square * 2.0_f32.sqrt()).ceil();
     let radius = config.range;
