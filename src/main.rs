@@ -50,23 +50,27 @@ fn main() {
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct TerrainExtension {
-    #[texture(100, dimension = "2d_array")]
-    #[sampler(101)]
-    array_texture: Handle<Image>,
-
-    #[texture(102, dimension = "2d", sample_type = "u_int")]
-    #[sampler(103, sampler_type = "non_filtering")]
-    material_index_map: Handle<Image>,
-
-    #[texture(104, dimension = "2d_array")]
-    #[sampler(105)]
-    array_normal: Handle<Image>,
-
-    #[uniform(106)]
+    #[uniform(100)]
     layers: u32,
 
-    #[uniform(107)]
+    #[uniform(101)]
     tiling_factor: f32,
+
+    #[texture(102, dimension = "2d_array")]
+    #[sampler(103)]
+    array_texture: Handle<Image>,
+
+    #[texture(104, dimension = "2d", sample_type = "u_int")]
+    #[sampler(105, sampler_type = "non_filtering")]
+    material_index_map: Handle<Image>,
+
+    #[texture(106, dimension = "2d_array")]
+    #[sampler(107)]
+    array_normal: Handle<Image>,
+
+    #[texture(108, dimension = "2d_array")]
+    #[sampler(109)]
+    array_roughness: Handle<Image>,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -84,6 +88,8 @@ struct LoadingTerrainTexture {
     is_loaded: bool,
     array_texture: Handle<Image>,
     array_normal: Handle<Image>,
+    array_roughness: Handle<Image>,
+
     material_index_map: Handle<Image>,
 }
 
@@ -94,8 +100,12 @@ impl LoadingTerrainTexture {
             .is_loaded();
         let is_array_texture_loaded = asset_server.load_state(&self.array_texture).is_loaded();
         let is_array_normal_loaded = asset_server.load_state(&self.array_normal).is_loaded();
+        let is_array_roughness_loaded = asset_server.load_state(&self.array_roughness).is_loaded();
 
-        is_mat_map_loaded && is_array_texture_loaded && is_array_normal_loaded
+        is_mat_map_loaded
+            && is_array_texture_loaded
+            && is_array_normal_loaded
+            && is_array_roughness_loaded
     }
 }
 
@@ -140,6 +150,11 @@ fn spawn_terrain(
         image.reinterpret_stacked_2d_as_array(layers);
     }
 
+    if let Some(image) = images.get_mut(&loading_texture.array_roughness) {
+        assert_eq!(image.height() / image.width(), layers);
+        image.reinterpret_stacked_2d_as_array(layers);
+    }
+
     if let Some(image) = images.get_mut(&loading_texture.material_index_map) {
         image.texture_descriptor.format = render_resource::TextureFormat::Rgba8Uint;
         image.sampler = bevy::image::ImageSampler::nearest();
@@ -155,6 +170,7 @@ fn spawn_terrain(
         extension: TerrainExtension {
             array_texture: loading_texture.array_texture.clone(),
             array_normal: loading_texture.array_normal.clone(),
+            array_roughness: loading_texture.array_roughness.clone(),
             material_index_map: loading_texture.material_index_map.clone(),
             layers,
             tiling_factor: 10.0,
@@ -377,6 +393,7 @@ fn setup(
         is_loaded: false,
         array_normal: asset_server.load("textures/array_normal.png"),
         array_texture: asset_server.load("textures/array_texture.png"),
+        array_roughness: asset_server.load("textures/array_roughness.png"),
         material_index_map: asset_server.load("textures/custom_map.png"),
     });
 
