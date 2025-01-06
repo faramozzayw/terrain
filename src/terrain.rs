@@ -139,7 +139,10 @@ impl Chunk {
         let normals = self.normals.into_par_iter().map(Into::into).collect();
         let indices = self.indices.into_par_iter().map(|v| v as u32).collect();
 
-        Self::create_mesh(positions, normals, self.uvs, indices)
+        let mut mesh = Self::create_mesh(positions, normals, self.uvs, indices);
+        // TODO: optimize this
+        mesh.generate_tangents().unwrap();
+        mesh
     }
 
     #[inline]

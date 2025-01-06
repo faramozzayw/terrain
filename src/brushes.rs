@@ -1,10 +1,60 @@
+use std::ops::RangeFrom;
+
 use bevy::prelude::*;
 use rayon::{
     iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator},
     slice::ParallelSliceMut,
 };
 
-use crate::{utils::get_mut_position_from_mesh, BrushConfig};
+use crate::utils::get_mut_position_from_mesh;
+
+#[derive(Debug, Resource, Reflect)]
+#[reflect(Resource)]
+pub struct BrushConfig {
+    pub range: f32,
+    pub strength: f32,
+    pub kind: BrushKind,
+    /// 0.1 to 0.5: Gentle falloff (spread effect widely).
+    /// 1.0: Linear falloff (balanced).
+    /// 2.0 to 5.0: Steep falloff (concentrated near the center).
+    #[reflect(@RangeFrom::<f32> { start: 0.0 })]
+    pub falloff_exponent: f32,
+    pub flatten_level: Option<f32>,
+    pub should_inverse_strength: bool,
+}
+
+impl BrushConfig {
+    #[inline]
+    pub fn range_squared(&self) -> f32 {
+        self.range * self.range
+    }
+
+    #[inline]
+    pub fn falloff_exponent(&self) -> f32 {
+        self.falloff_exponent.max(0.1)
+    }
+
+    pub fn strength(&self) -> f32 {
+        if self.should_inverse_strength {
+            return self.strength * -1.0;
+        }
+
+        self.strength
+    }
+}
+
+impl Default for BrushConfig {
+    fn default() -> Self {
+        Self {
+            range: 30.0,
+            strength: 1.0,
+            kind: BrushKind::Sculp,
+            falloff_exponent: 1.0,
+            flatten_level: None,
+            should_inverse_strength: false,
+        }
+    }
+}
 
 #[derive(Debug, Reflect, Clone, Copy)]
 pub enum BrushKind {

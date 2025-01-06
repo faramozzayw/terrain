@@ -2,7 +2,7 @@ pub mod brushes;
 mod terrain;
 mod utils;
 
-use std::ops::{DerefMut, RangeFrom};
+use std::ops::DerefMut;
 
 use bevy::{
     color::palettes::css::WHITE,
@@ -13,7 +13,7 @@ use bevy::{
 };
 use bevy_flycam::{MovementSettings, PlayerPlugin};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
-use brushes::{apply_brush, BrushKind};
+use brushes::{apply_brush, BrushConfig, BrushKind};
 use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use terrain::{Chunk, Terrain};
@@ -29,8 +29,8 @@ fn main() {
         .add_systems(
             Update,
             (
-                change_brush_kind,
-                create_array_texture,
+                handle_keyboard_input,
+                spawn_terrain,
                 raycast.pipe(raycast_handle).pipe(pipe_noop_option),
             ),
         )
@@ -58,8 +58,15 @@ pub struct TerrainExtension {
     #[sampler(103, sampler_type = "non_filtering")]
     material_index_map: Handle<Image>,
 
-    #[uniform(104)]
+    #[texture(104, dimension = "2d_array")]
+    #[sampler(105)]
+    array_normal: Handle<Image>,
+
+    #[uniform(106)]
     layers: u32,
+
+    #[uniform(107)]
+    tiling_factor: f32,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -76,7 +83,20 @@ impl MaterialExtension for TerrainExtension {
 struct LoadingTerrainTexture {
     is_loaded: bool,
     array_texture: Handle<Image>,
+    array_normal: Handle<Image>,
     material_index_map: Handle<Image>,
+}
+
+impl LoadingTerrainTexture {
+    pub fn is_textures_are_loaded(&self, asset_server: &AssetServer) -> bool {
+        let is_mat_map_loaded = asset_server
+            .load_state(&self.material_index_map)
+            .is_loaded();
+        let is_array_texture_loaded = asset_server.load_state(&self.array_texture).is_loaded();
+        let is_array_normal_loaded = asset_server.load_state(&self.array_normal).is_loaded();
+
+        is_mat_map_loaded && is_array_texture_loaded && is_array_normal_loaded
+    }
 }
 
 #[derive(Debug, Component, PartialEq, Eq, Reflect)]
@@ -96,7 +116,7 @@ impl ChunkMetadata {
     }
 }
 
-fn create_array_texture(
+fn spawn_terrain(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut loading_texture: ResMut<LoadingTerrainTexture>,
@@ -104,14 +124,7 @@ fn create_array_texture(
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, TerrainExtension>>>,
 ) {
-    let is_textures_are_loaded = asset_server
-        .load_state(&loading_texture.material_index_map)
-        .is_loaded()
-        && asset_server
-            .load_state(&loading_texture.array_texture)
-            .is_loaded();
-
-    if loading_texture.is_loaded || !is_textures_are_loaded {
+    if loading_texture.is_loaded || !loading_texture.is_textures_are_loaded(&asset_server) {
         return;
     }
     loading_texture.is_loaded = true;
@@ -119,6 +132,11 @@ fn create_array_texture(
 
     if let Some(image) = images.get_mut(&loading_texture.array_texture) {
         layers = image.height() / image.width();
+        image.reinterpret_stacked_2d_as_array(layers);
+    }
+
+    if let Some(image) = images.get_mut(&loading_texture.array_normal) {
+        assert_eq!(image.height() / image.width(), layers);
         image.reinterpret_stacked_2d_as_array(layers);
     }
 
@@ -130,12 +148,16 @@ fn create_array_texture(
     let extension_handle = terrain_materials.add(ExtendedMaterial {
         base: StandardMaterial {
             base_color: Color::NONE,
+            // metallic: 0.0,
+            // reflectance: 0.0,
             ..Default::default()
         },
         extension: TerrainExtension {
             array_texture: loading_texture.array_texture.clone(),
+            array_normal: loading_texture.array_normal.clone(),
             material_index_map: loading_texture.material_index_map.clone(),
             layers,
+            tiling_factor: 10.0,
         },
     });
 
@@ -144,66 +166,24 @@ fn create_array_texture(
 
     let terrain = Terrain::generate_chunks(&heightmap, num_chunks);
 
-    for chunk in &terrain.chunks {
+    let chunks = terrain
+        .chunks
+        .into_par_iter()
+        .map(|chunk| (chunk.chunk_x, chunk.chunk_y, chunk.into_mesh()))
+        .collect::<Vec<_>>();
+
+    for (chunk_x, chunk_y, mesh) in chunks {
         commands.spawn((
-            Name::new(format!("Chunk {}x{}", chunk.chunk_x, chunk.chunk_y)),
-            Mesh3d(meshes.add(chunk.clone().into_mesh())),
-            ChunkMetadata::new(chunk.chunk_x, chunk.chunk_y),
+            Name::new(format!("Chunk {}x{}", chunk_x, chunk_y)),
+            Mesh3d(meshes.add(mesh)),
+            ChunkMetadata::new(chunk_x, chunk_y),
             MeshMaterial3d(extension_handle.clone()),
             Transform::from_xyz(
-                (chunk.chunk_x * Chunk::SIZE) as f32,
+                (chunk_x * Chunk::SIZE) as f32,
                 0.0,
-                (chunk.chunk_y * Chunk::SIZE) as f32,
+                (chunk_y * Chunk::SIZE) as f32,
             ),
         ));
-    }
-}
-
-#[derive(Debug, Resource, Reflect)]
-#[reflect(Resource)]
-pub struct BrushConfig {
-    pub range: f32,
-    pub strength: f32,
-    pub kind: BrushKind,
-    /// 0.1 to 0.5: Gentle falloff (spread effect widely).
-    /// 1.0: Linear falloff (balanced).
-    /// 2.0 to 5.0: Steep falloff (concentrated near the center).
-    #[reflect(@RangeFrom::<f32> { start: 0.0 })]
-    pub falloff_exponent: f32,
-    pub flatten_level: Option<f32>,
-    pub should_inverse_strength: bool,
-}
-
-impl BrushConfig {
-    #[inline]
-    pub fn range_squared(&self) -> f32 {
-        self.range * self.range
-    }
-
-    #[inline]
-    pub fn falloff_exponent(&self) -> f32 {
-        self.falloff_exponent.max(0.1)
-    }
-
-    pub fn strength(&self) -> f32 {
-        if self.should_inverse_strength {
-            return self.strength * -1.0;
-        }
-
-        self.strength
-    }
-}
-
-impl Default for BrushConfig {
-    fn default() -> Self {
-        Self {
-            range: 30.0,
-            strength: 1.0,
-            kind: BrushKind::Sculp,
-            falloff_exponent: 1.0,
-            flatten_level: None,
-            should_inverse_strength: false,
-        }
     }
 }
 
@@ -298,6 +278,7 @@ fn raycast_handle(
                 let meshes = &mut *meshes_ptr;
                 meshes.get_mut(&chunk.0)?
             };
+
             Some((center, chunk_mesh))
         })
         .collect_vec()
@@ -348,7 +329,11 @@ fn recalculate_normals_for_chunk(
     Some(())
 }
 
-fn change_brush_kind(mut config: ResMut<BrushConfig>, keys: Res<ButtonInput<KeyCode>>) {
+fn handle_keyboard_input(
+    mut config: ResMut<BrushConfig>,
+    mut light: Query<&mut DirectionalLight>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
     if keys.just_pressed(KeyCode::Digit1) {
         config.kind = BrushKind::Sculp;
     }
@@ -368,6 +353,11 @@ fn change_brush_kind(mut config: ResMut<BrushConfig>, keys: Res<ButtonInput<KeyC
     if keys.pressed(KeyCode::PageDown) {
         config.range -= 0.25;
     }
+
+    if keys.just_pressed(KeyCode::KeyL) {
+        let mut light = light.single_mut();
+        light.shadows_enabled = !light.shadows_enabled;
+    }
 }
 
 fn pipe_noop_option<T>(_: In<Option<T>>) {}
@@ -385,6 +375,7 @@ fn setup(
 
     commands.insert_resource(LoadingTerrainTexture {
         is_loaded: false,
+        array_normal: asset_server.load("textures/array_normal.png"),
         array_texture: asset_server.load("textures/array_texture.png"),
         material_index_map: asset_server.load("textures/custom_map.png"),
     });
@@ -403,8 +394,8 @@ fn setup(
         },
         Transform::from_xyz(5.0, 5.0, 5.0).with_rotation(Quat::from_euler(
             EulerRot::XYZ,
-            -0.1,
-            0.0,
+            0.1,
+            3.6,
             0.0,
         )),
     ));
