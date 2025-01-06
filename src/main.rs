@@ -1,10 +1,7 @@
 mod terrain;
 mod utils;
 
-use std::{
-    collections::HashMap,
-    ops::{DerefMut, RangeFrom},
-};
+use std::ops::{DerefMut, RangeFrom};
 
 use bevy::{
     color::palettes::css::WHITE,
@@ -194,7 +191,7 @@ impl BrushConfig {
 impl Default for BrushConfig {
     fn default() -> Self {
         Self {
-            range: 150.0,
+            range: 30.0,
             strength: 1.0,
             kind: BrushKind::Sculp,
             falloff_exponent: 1.0,
@@ -365,7 +362,7 @@ fn apply_sculp_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) 
                 });
         });
 
-    println!("for_each: {:?}", now.elapsed());
+    println!("Duration sculp: {:?}", now.elapsed());
 
     Some(())
 }
@@ -399,35 +396,51 @@ fn apply_flatten_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig
     Some(())
 }
 
+const NEIGHBOR_OFFSETS: [(i32, i32); 9] = [
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 0),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+];
+
 // TODO: multichunk
 fn apply_smooth_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) -> Option<()> {
     let positions = get_mut_position_from_mesh(chunk_mesh)?;
     let falloff_exponent = config.falloff_exponent();
     let radius_squared = config.range_squared();
     let inv_range_squared = 1.0 / radius_squared;
+    let inv_range = 1.0 / config.range;
 
-    let grid: HashMap<(i32, i32), Vec<[f32; 3]>> = positions
+    let Vec2 { x: min_x, y: min_y } = center - config.range;
+    let Vec2 { x: max_x, y: max_y } = center + config.range;
+
+    let grid = positions
         .par_iter()
         .map(|pos| {
             let cell = (
-                (pos[0] / config.range).floor() as i32,
-                (pos[2] / config.range).floor() as i32,
+                (pos[0] * inv_range).floor() as usize,
+                (pos[2] * inv_range).floor() as usize,
             );
             (cell, *pos)
         })
-        .fold(HashMap::new, |mut acc, (cell, pos)| {
+        .fold(std::collections::HashMap::new, |mut acc, (cell, pos)| {
             #[allow(clippy::unwrap_or_default)]
             acc.entry(cell).or_insert_with(Vec::new).push(pos);
             acc
         })
-        .reduce(HashMap::new, |mut acc1, acc2| {
+        .reduce(std::collections::HashMap::new, |mut acc1, acc2| {
             for (key, mut value) in acc2 {
-                acc1.entry(key)
-                    .and_modify(|v| v.append(&mut value)) // Combine vectors for common keys
-                    .or_insert(value);
+                acc1.entry(key).or_default().append(&mut value);
             }
             acc1
         });
+
+    let now = std::time::Instant::now();
 
     positions
         .par_iter_mut()
@@ -441,38 +454,54 @@ fn apply_smooth_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig)
             )
         })
         .for_each(|(position, falloff)| {
-            let this = Vec2::new(position[0], position[2]);
+            let pos = Vec2::new(position[0], position[2]);
+            let cell_x = (position[0] * inv_range).floor() as i32;
+            let cell_y = (position[2] * inv_range).floor() as i32;
 
-            let cell = (
-                (this.x / config.range).floor() as i32,
-                (this.y / config.range).floor() as i32,
-            );
+            let (sum_heights, count) = NEIGHBOR_OFFSETS
+                .par_iter()
+                .map(|(dx, dy)| {
+                    let mut sum = 0.0;
+                    let mut count = 0;
 
-            // This code generates a 3x3 grid of neighboring cells around a target cell `(cell.0, cell.1)`.
-            // The range `(-1..=1)` produces offsets for both the x and z axes, covering the target cell and its 8 neighbors.
-            // For each `(dx, dz)` pair, we compute the new coordinates `(cell.0 + dx, cell.1 + dz)` and return them.
-            // The result is a list of all neighboring cells (including the target cell itself) within a 3x3 grid.
-            let neighbors = (-1..=1)
-                .flat_map(|dx| (-1..=1).map(move |dz| (cell.0 + dx, cell.1 + dz)))
-                .flat_map(|neighbor_cell| grid.get(&neighbor_cell).into_iter().flatten());
+                    let x = (cell_x + dx) as usize;
+                    let y = (cell_y + dy) as usize;
 
-            let mut sum_heights = 0.0;
-            let mut count = 0usize;
+                    let Some(neighbors) = grid.get(&(x, y)) else {
+                        return (sum, count);
+                    };
 
-            neighbors.for_each(|neighbor| {
-                let neighbor_pos = Vec2::new(neighbor[0], neighbor[2]);
-                if this.distance_squared(neighbor_pos) <= radius_squared {
-                    sum_heights += neighbor[1];
-                    count += 1;
-                }
-            });
+                    for neighbor in neighbors {
+                        let x = neighbor[0];
+                        let y = neighbor[2];
+                        let neighbor_pos = Vec2::new(x, y);
 
-            if count != 0 {
-                let smoothed_height = sum_heights / count as f32;
-                position[1] = position[1] * (1.0 - config.strength * falloff)
-                    + smoothed_height * (config.strength * falloff);
+                        let in_valid_range = x >= min_x && x <= max_x && y >= min_y && y <= max_y;
+
+                        if in_valid_range && pos.distance_squared(neighbor_pos) <= radius_squared {
+                            sum += neighbor[1];
+                            count += 1;
+                        }
+                    }
+
+                    (sum, count)
+                })
+                .reduce(
+                    || (0.0, 0),
+                    |(sum1, count1), (sum2, count2)| (sum1 + sum2, count1 + count2),
+                );
+
+            if count == 0 {
+                return;
             }
+
+            let smoothed_height = sum_heights / count as f32;
+            let blend_factor = config.strength * falloff;
+
+            position[1] = position[1] * (1.0 - blend_factor) + smoothed_height * blend_factor;
         });
+
+    println!("Duration: {:?}", now.elapsed());
 
     Some(())
 }

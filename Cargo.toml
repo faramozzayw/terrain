@@ -12,4 +12,5 @@ gltf = "1.3"
 image = "0.25"
 rayon = "1.10"
 itertools = "0.14"
+crossbeam = "0.8.4"
 
