@@ -171,6 +171,7 @@ pub struct BrushConfig {
     #[reflect(@RangeFrom::<f32> { start: 0.0 })]
     pub falloff_exponent: f32,
     pub flatten_level: Option<f32>,
+    pub should_inverse_strength: bool,
 }
 
 impl BrushConfig {
@@ -183,6 +184,14 @@ impl BrushConfig {
     pub fn falloff_exponent(&self) -> f32 {
         self.falloff_exponent.max(0.1)
     }
+
+    pub fn strength(&self) -> f32 {
+        if self.should_inverse_strength {
+            return self.strength * -1.0;
+        }
+
+        self.strength
+    }
 }
 
 impl Default for BrushConfig {
@@ -193,6 +202,7 @@ impl Default for BrushConfig {
             kind: BrushKind::Sculp,
             falloff_exponent: 1.0,
             flatten_level: None,
+            should_inverse_strength: false,
         }
     }
 }
@@ -218,7 +228,11 @@ fn raycast(
             )
             .resolution(64);
 
-        if !keys.pressed(MouseButton::Left) {
+        if keys.pressed(MouseButton::Right) && matches!(config.kind, BrushKind::Sculp) {
+            config.should_inverse_strength = true;
+        } else if keys.pressed(MouseButton::Left) && matches!(config.kind, BrushKind::Sculp) {
+            config.should_inverse_strength = false;
+        } else if !keys.pressed(MouseButton::Left) {
             config.flatten_level = None;
             return None;
         }

@@ -46,6 +46,7 @@ fn apply_sculp_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) 
     let falloff_exponent = config.falloff_exponent();
     let radius_squared = config.range_squared();
     let inv_range_squared = 1.0 / radius_squared;
+    let strength = config.strength();
 
     let now = std::time::Instant::now();
 
@@ -65,7 +66,7 @@ fn apply_sculp_brush(center: Vec2, chunk_mesh: &mut Mesh, config: &BrushConfig) 
                     )
                 })
                 .for_each(|(position, falloff)| {
-                    position[1] += config.strength * falloff;
+                    position[1] += strength * falloff;
                 });
         });
 
