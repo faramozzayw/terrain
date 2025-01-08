@@ -1,28 +1,35 @@
 pub mod brushes;
+pub mod daytime;
 mod terrain;
+pub mod time;
 mod utils;
 
 use std::ops::DerefMut;
 
 use bevy::{
-    color::palettes::css::WHITE,
     pbr::{ExtendedMaterial, MaterialExtension},
     picking::{backend::ray::RayMap, mesh_picking::ray_cast::RayMeshHit},
     prelude::*,
     render::render_resource::{self, AsBindGroup},
 };
-use bevy_flycam::{MovementSettings, PlayerPlugin};
+use bevy_atmosphere::plugin::AtmosphereCamera;
+use bevy_flycam::{FlyCam, MovementSettings, NoCameraPlayerPlugin};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use brushes::{apply_brush, BrushConfig, BrushKind};
 use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use terrain::{Chunk, Terrain};
+use time::TimeTrackerPlugin;
 use utils::parse_heightmap;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(PlayerPlugin)
+        .add_plugins((
+            TimeTrackerPlugin::new(1_800.0),
+            daytime::DaylightCyclePlugin,
+            NoCameraPlayerPlugin,
+        ))
         .add_plugins(WorldInspectorPlugin::new())
         .add_systems(Startup, setup)
         .add_event::<RecalculateNormals>()
@@ -71,6 +78,10 @@ pub struct TerrainExtension {
     #[texture(108, dimension = "2d_array")]
     #[sampler(109)]
     array_roughness: Handle<Image>,
+
+    #[texture(110, dimension = "2d_array")]
+    #[sampler(111)]
+    array_displacement: Handle<Image>,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -89,6 +100,7 @@ struct LoadingTerrainTexture {
     array_texture: Handle<Image>,
     array_normal: Handle<Image>,
     array_roughness: Handle<Image>,
+    array_displacement: Handle<Image>,
 
     material_index_map: Handle<Image>,
 }
@@ -101,11 +113,15 @@ impl LoadingTerrainTexture {
         let is_array_texture_loaded = asset_server.load_state(&self.array_texture).is_loaded();
         let is_array_normal_loaded = asset_server.load_state(&self.array_normal).is_loaded();
         let is_array_roughness_loaded = asset_server.load_state(&self.array_roughness).is_loaded();
+        let is_array_displacement_loaded = asset_server
+            .load_state(&self.array_displacement)
+            .is_loaded();
 
         is_mat_map_loaded
             && is_array_texture_loaded
             && is_array_normal_loaded
             && is_array_roughness_loaded
+            && is_array_displacement_loaded
     }
 }
 
@@ -155,6 +171,11 @@ fn spawn_terrain(
         image.reinterpret_stacked_2d_as_array(layers);
     }
 
+    if let Some(image) = images.get_mut(&loading_texture.array_displacement) {
+        assert_eq!(image.height() / image.width(), layers);
+        image.reinterpret_stacked_2d_as_array(layers);
+    }
+
     if let Some(image) = images.get_mut(&loading_texture.material_index_map) {
         image.texture_descriptor.format = render_resource::TextureFormat::Rgba8Uint;
         image.sampler = bevy::image::ImageSampler::nearest();
@@ -163,17 +184,17 @@ fn spawn_terrain(
     let extension_handle = terrain_materials.add(ExtendedMaterial {
         base: StandardMaterial {
             base_color: Color::NONE,
-            // metallic: 0.0,
-            // reflectance: 0.0,
+            reflectance: 0.0,
             ..Default::default()
         },
         extension: TerrainExtension {
             array_texture: loading_texture.array_texture.clone(),
             array_normal: loading_texture.array_normal.clone(),
             array_roughness: loading_texture.array_roughness.clone(),
+            array_displacement: loading_texture.array_displacement.clone(),
             material_index_map: loading_texture.material_index_map.clone(),
             layers,
-            tiling_factor: 10.0,
+            tiling_factor: 5.0,
         },
     });
 
@@ -389,11 +410,16 @@ fn setup(
         config.depth_bias = -1.;
     }
 
+    let (_, light_config) = config_store.config_mut::<LightGizmoConfigGroup>();
+    light_config.draw_all = true;
+    light_config.color = LightGizmoColor::MatchLightColor;
+
     commands.insert_resource(LoadingTerrainTexture {
         is_loaded: false,
         array_normal: asset_server.load("textures/array_normal.png"),
         array_texture: asset_server.load("textures/array_texture.png"),
         array_roughness: asset_server.load("textures/array_roughness.png"),
+        array_displacement: asset_server.load("textures/array_displacement.png"),
         material_index_map: asset_server.load("textures/custom_map.png"),
     });
 
@@ -404,16 +430,9 @@ fn setup(
     ));
 
     commands.spawn((
-        DirectionalLight {
-            illuminance: 10_000.0,
-            color: WHITE.into(),
-            ..default()
-        },
-        Transform::from_xyz(5.0, 5.0, 5.0).with_rotation(Quat::from_euler(
-            EulerRot::XYZ,
-            0.1,
-            3.6,
-            0.0,
-        )),
+        Camera3d::default(),
+        Transform::from_xyz(5., 0., 5.),
+        AtmosphereCamera::default(),
+        FlyCam,
     ));
 }

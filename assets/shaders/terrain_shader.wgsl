@@ -1,20 +1,13 @@
+#import bevy_pbr::pbr_fragment::pbr_input_from_standard_material;
+#import bevy_render::{view::View, maths::affine3_to_square}
+#import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_clip}
 #import bevy_pbr::{
-  pbr_fragment::pbr_input_from_standard_material,
-  pbr_functions::alpha_discard,
-}
-
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-  prepass_io::{VertexOutput, FragmentOutput},
-  pbr_deferred_functions::deferred_output,
-}
-#else
-#import bevy_pbr::{
-  forward_io::{VertexOutput, FragmentOutput},
-  pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_tbn_mikktspace, apply_normal_mapping, prepare_world_normal, calculate_view},
+  mesh_view_bindings::view,
+  forward_io::{VertexOutput, Vertex, FragmentOutput},
+  pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view, calculate_tbn_mikktspace, apply_normal_mapping, prepare_world_normal},
   pbr_types::{STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT, PbrInput, pbr_input_new},
 }
-#endif
+#import bevy_core_pipeline::tonemapping::tone_mapping
 
 @group(2) @binding(100)
 var<uniform> layers: u32;
@@ -42,18 +35,20 @@ var array_roughness: texture_2d_array<f32>;
 @group(2) @binding(109) 
 var array_roughness_sampler: sampler;
 
+@group(2) @binding(110)
+var array_displacement: texture_2d_array<f32>;
+@group(2) @binding(111) 
+var array_displacement_sampler: sampler;
+
 @fragment
 fn fragment(
     in: VertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
   let height = in.world_position.y;
-  var pbr_input = pbr_input_from_standard_material(in, is_front);
-
   let max_grass_level = 5.0;
   let max_rock_level = 10.0;
-
-  let tiled_uv = fract(in.uv * 5.0);
+  let tiled_uv = fract(in.uv * tiling_factor);
 
   let sand = textureSample(array_texture, array_texture_sampler, tiled_uv, 1);
   let sand_normal = textureSample(array_normal, array_normal_sampler, tiled_uv, 1).xyz;
@@ -77,7 +72,7 @@ fn fragment(
 
   var color = sand;
   var normal_from_map = sand_normal;
-  var roughness = sand_roughness; 
+  var roughness = sand_roughness;
 
   color = mix(sand, dirt, smoothstep(-20.0, -10.0, height));
   normal_from_map = mix(sand_normal, dirt_normal, smoothstep(-20.0, -10.0, height));
@@ -85,15 +80,15 @@ fn fragment(
 
   color = mix(color, grass, smoothstep(0.0, max_grass_level, height));
   normal_from_map = mix(normal_from_map, dirt_normal, smoothstep(0.0, max_grass_level, height));
-  roughness = mix(sand_roughness, dirt_roughness, smoothstep(0.0, max_grass_level, height));
+  roughness = mix(roughness, dirt_roughness, smoothstep(0.0, max_grass_level, height));
 
   color = mix(color, rock, smoothstep(max_grass_level, max_rock_level, height));
   normal_from_map = mix(normal_from_map, rock_normal, smoothstep(max_grass_level, max_rock_level, height));
-  roughness = mix(sand_roughness, dirt_roughness, smoothstep(max_grass_level, max_rock_level, height));
+  roughness = mix(roughness, rock_roughness, smoothstep(max_grass_level, max_rock_level, height));
 
   color = mix(color, snow, smoothstep(max_rock_level + 5.0, 50.0, height));
   normal_from_map = mix(normal_from_map, snow_normal, smoothstep(max_rock_level + 5.0, 50.0, height));
-  roughness = mix(sand_roughness, dirt_roughness, smoothstep(max_rock_level + 5.0, 50.0, height));
+  roughness = mix(roughness, snow_roughness, smoothstep(max_rock_level + 5.0, 50.0, height));
 
   let material_index = textureLoad(
     material_index_map,
@@ -111,29 +106,33 @@ fn fragment(
   normal_from_map = select(normal_from_map, textureSample(array_normal, array_normal_sampler, tiled_uv, 0).rgb, use_default_texture).rgb;
   roughness = select(roughness, textureSample(array_roughness, array_roughness_sampler, tiled_uv, 0).r, use_default_texture);
 
-  pbr_input.world_normal = prepare_world_normal(
-     in.world_normal,
-      false,
-      is_front,
-  );
-  pbr_input.N = normalize(pbr_input.world_normal);
+  var pbr_input = pbr_input_from_standard_material(in, is_front);
 
-  #ifdef VERTEX_TANGENTS
-    let TBN = calculate_tbn_mikktspace(in.world_normal, in.world_tangent);
-
-    pbr_input.world_normal = normalize(TBN * normal_from_map);
-    pbr_input.N = apply_normal_mapping(
-        pbr_input.material.flags,
-        TBN,
-        false,
-        is_front,
-        pbr_input.world_normal.rgb,
-    );
-  #endif
-
-  pbr_input.V = calculate_view(in.world_position, pbr_input.is_orthographic);
   pbr_input.material.base_color = color;
   pbr_input.material.perceptual_roughness = roughness;
+
+  let normal = normal_from_map * in.world_normal;
+  // let normal = mix(in.world_normal, normal_from_map, .5);
+
+  pbr_input.world_normal = prepare_world_normal(
+    normal,
+    false,
+    is_front,
+  );
+
+  pbr_input.N = normalize(normal);
+
+  // let TBN = calculate_tbn_mikktspace(normal, in.world_tangent);
+  // pbr_input.N = apply_normal_mapping(
+  //   pbr_input.material.flags,
+  //   TBN,
+  //   false,
+  //   is_front,
+  //   normal.rgb,
+  // );
+
+  // pbr_input.material.base_color = vec4(normal, 1.0);
+  // pbr_input.material.base_color = vec4(roughness, roughness, roughness, 1.0);
 
 #ifdef PREPASS_PIPELINE
   let out = deferred_output(in, pbr_input);
@@ -142,6 +141,7 @@ fn fragment(
   out.color = apply_pbr_lighting(pbr_input);
 
   out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+  out.color = tone_mapping(out.color, view.color_grading);
 #endif
  
   return out;
